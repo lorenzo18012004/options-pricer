@@ -1,0 +1,254 @@
+import logging
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+logger = logging.getLogger(__name__)
+
+from core import BlackScholes, IVsolver
+from models import VolatilitySurface
+from data import DataConnector, DataCleaner
+from services import (
+    build_expiration_options,
+    load_market_snapshot,
+    require_hist_vol_market_only,
+)
+from .vanilla_helpers import (
+    render_volatility_tab,
+    render_greeks_tabs,
+    render_pnl_tab,
+    render_attribution_tab,
+    render_heston_tab,
+    render_mc_tab,
+    render_pricing_tab,
+    render_risk_tab,
+    render_surfaces_section,
+    render_market_summary,
+    render_data_quality,
+    render_chain_display,
+)
+
+
+def render_vanilla_option_pricer():
+    """Vanilla Option Pricing - Complete Analysis with Live Data"""
+    st.markdown("### Vanilla Option Pricer - Live Data")
+
+    # --- Asset & Expiration Selection ---
+    popular_tickers = {
+        "AAPL - Apple": "AAPL", "MSFT - Microsoft": "MSFT",
+        "TSLA - Tesla": "TSLA", "NVDA - NVIDIA": "NVDA",
+        "GOOGL - Google": "GOOGL", "AMZN - Amazon": "AMZN",
+        "META - Meta": "META", "SPY - S&P 500 ETF": "SPY",
+        "QQQ - Nasdaq 100 ETF": "QQQ", "BA - Boeing": "BA",
+        "JPM - JPMorgan": "JPM", "NFLX - Netflix": "NFLX",
+        "AMD - AMD": "AMD", "DIS - Disney": "DIS",
+        "GLD - Gold ETF": "GLD", "IWM - Russell 2000": "IWM",
+        "Custom": "CUSTOM"
+    }
+
+    col_sel1, col_sel2 = st.columns([3, 1])
+    with col_sel1:
+        selected = st.selectbox("Select Asset", list(popular_tickers.keys()))
+    if popular_tickers[selected] == "CUSTOM":
+        with col_sel2:
+            ticker = st.text_input("Ticker", placeholder="AAPL").upper()
+            if not ticker:
+                return
+    else:
+        ticker = popular_tickers[selected]
+        with col_sel2:
+            st.metric("Symbol", ticker)
+
+    if not st.button("Load Market Data", type="primary", use_container_width=True) and "vp_data" not in st.session_state:
+        return
+
+    try:
+        # --- Fetch all data ---
+        with st.spinner(f"Loading {ticker}..."):
+            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker)
+
+        st.session_state["vp_data"] = True
+
+        # --- Expiration picker (show all, no pre-filtering) ---
+        exp_options = build_expiration_options(expirations, max_items=20)
+
+        if not exp_options:
+            st.error("No valid expirations")
+            return
+
+        selected_exp = st.selectbox("Expiration", [e["label"] for e in exp_options])
+        sel_idx = [e["label"] for e in exp_options].index(selected_exp)
+        exp_date = exp_options[sel_idx]["date"]
+        cal_days_to_exp = exp_options[sel_idx]["days"]
+        try:
+            today_np = np.datetime64(datetime.now().date())
+            exp_np = np.datetime64(datetime.strptime(exp_date, "%Y-%m-%d").date())
+            biz_days_to_exp = int(np.busday_count(today_np, exp_np))
+        except (ValueError, TypeError) as e:
+            logger.debug("Business days fallback: %s", e)
+            biz_days_to_exp = max(1, cal_days_to_exp)
+
+        # Desk strict convention for equity vanilla:
+        # - Maturity clock: calendar days
+        # - Day count basis: ACT/365
+        day_count_basis = "ACT/365"
+        maturity_mode = "Calendar days"
+        days_to_exp = max(1, cal_days_to_exp)
+        T = days_to_exp / 365.0
+
+        # Fetch rate, vol, chain
+        with st.spinner("Loading options data..."):
+            rate = DataConnector.get_risk_free_rate(T)
+            hist_vol = require_hist_vol_market_only(ticker, max(1, biz_days_to_exp))
+            calls, puts = DataConnector.get_option_chain(ticker, exp_date)
+            if biz_days_to_exp < 14:
+                hv_window = 10
+            elif biz_days_to_exp < 45:
+                hv_window = 20
+            elif biz_days_to_exp < 90:
+                hv_window = 60
+            elif biz_days_to_exp < 180:
+                hv_window = 120
+            else:
+                hv_window = 252
+
+        option_type = st.radio("Option Type", ["Call", "Put"], horizontal=True)
+        opt_type = option_type.lower()
+        chain = (calls if opt_type == "call" else puts).copy()
+        raw_chain = chain.copy()
+        raw_count = len(raw_chain)
+        quote_ts = None
+        if "lastTradeDate" in raw_chain.columns and len(raw_chain) > 0:
+            try:
+                quote_ts = str(pd.to_datetime(raw_chain["lastTradeDate"]).max())
+            except (ValueError, TypeError, KeyError) as e:
+                logger.debug("Quote timestamp unavailable: %s", e)
+                quote_ts = None
+        chain = DataCleaner.clean_option_chain(chain, min_bid=0.01)
+        chain = DataCleaner.filter_by_moneyness(chain, spot, 0.80, 1.20)
+        filtered_count = len(chain)
+
+        if len(chain) == 0:
+            st.warning("No liquid options found")
+            return
+
+        svi_params = None
+        svi_fit_rmse_pct = None
+        use_svi_for_pricing = st.checkbox(
+            "Use SVI smoothed IV for pricing/Greeks",
+            value=True,
+            help="Desk-style: smooth noisy market IV before pricing and Greeks."
+        )
+        svi_mask = chain["impliedVolatility"].notna() & (chain["impliedVolatility"] > 0.01) & (chain["impliedVolatility"] < 3.0)
+        if svi_mask.sum() >= 5:
+            try:
+                svi_model = VolatilitySurface([], [], [])
+                strikes_svi = chain.loc[svi_mask, "strike"].values.astype(float)
+                ivs_svi = chain.loc[svi_mask, "impliedVolatility"].values.astype(float)
+                svi_params = svi_model.calibrate_svi(strikes_svi, ivs_svi, spot)
+                if svi_params is not None:
+                    iv_fit = np.array([svi_model.get_iv_from_svi(k, spot, svi_params) for k in strikes_svi], dtype=float)
+                    svi_fit_rmse_pct = float(np.sqrt(np.mean((iv_fit - ivs_svi) ** 2)) * 100)
+            except (ValueError, RuntimeError) as e:
+                logger.warning("SVI calibration failed: %s", e)
+                svi_params = None
+
+        results = []
+        for _, row in chain.iterrows():
+            K = row["strike"]
+            bid, ask = row["bid"], row["ask"]
+            mid = (bid + ask) / 2 if (bid + ask) > 0 else row.get("lastPrice", 0)
+            if mid <= 0:
+                continue
+
+            market_iv = row.get("impliedVolatility", None)
+            if market_iv is None or market_iv <= 0:
+                market_iv = IVsolver.find_implied_vol(mid, spot, K, T, rate, opt_type, div_yield)
+            if market_iv is None or market_iv <= 0:
+                continue
+
+            svi_iv = None
+            if svi_params is not None:
+                try:
+                    svi_iv = float(svi_model.get_iv_from_svi(K, spot, svi_params))
+                    svi_iv = float(np.clip(svi_iv, 0.01, 3.0))
+                except (ValueError, TypeError, KeyError):
+                    svi_iv = None
+
+            iv_used = svi_iv if (use_svi_for_pricing and svi_iv is not None) else market_iv
+
+            model_price = BlackScholes.get_price(spot, K, T, rate, hist_vol, opt_type, div_yield)
+            greeks = BlackScholes.get_all_greeks(spot, K, T, rate, iv_used, opt_type, div_yield)
+
+            exec_cost = (ask - bid) / 2
+
+            results.append({
+                "Strike": K, "Moneyness": K / spot,
+                "Bid": bid, "Ask": ask, "Mid": mid,
+                "Spread_%": ((ask - bid) / mid * 100) if mid > 0 else 0,
+                "IV_%": market_iv * 100, "SVI_IV_%": (svi_iv * 100) if svi_iv is not None else np.nan,
+                "IV_Used_%": iv_used * 100, "HV_%": hist_vol * 100,
+                "BS_Price": greeks["price"], "Model_HV": model_price,
+                "Mispricing": model_price - mid,
+                "Cost_Ask": ask * 100,
+                "Exec_Cost": exec_cost * 100,
+                "Delta": greeks["delta"], "Gamma": greeks["gamma"],
+                "Vega": greeks["vega"], "Theta": greeks["theta"],
+                "Rho": greeks["rho"],
+                "Vanna": greeks["vanna"], "Volga": greeks["volga"],
+                "Charm": greeks["charm"],
+                "Volume": row.get("volume", 0), "OpenInt": row.get("openInterest", 0)
+            })
+
+        if not results:
+            st.warning("Could not compute IVs")
+            return
+        df = pd.DataFrame(results)
+
+        summary_box = st.expander("Market Summary", expanded=True)
+        atm_idx = (df["Moneyness"] - 1.0).abs().idxmin()
+        atm_iv = df.loc[atm_idx, "IV_%"]
+        atm_strike = df.loc[atm_idx, "Strike"]
+        render_market_summary(
+            summary_box, df, spot, atm_idx, days_to_exp, maturity_mode,
+            rate, atm_iv, atm_strike, hv_window, hist_vol, biz_days_to_exp
+        )
+
+        dq_box = st.expander("Data Quality", expanded=False)
+        render_data_quality(
+            dq_box, df, raw_count, filtered_count, quote_ts, opt_type,
+            svi_fit_rmse_pct, day_count_basis
+        )
+
+        chain_box = st.expander(f"{option_type} Chain - {ticker} {exp_date}", expanded=False)
+        render_chain_display(chain_box, df, option_type, ticker, exp_date)
+
+        analysis_box = st.expander("Analysis", expanded=True)
+        tab_vol, tab_greeks, tab_pnl, tab_attrib, tab_heston, tab_mc, tab_pricing, tab_risk = analysis_box.tabs([
+            "Volatility", "Greeks", "P&L", "P&L Attribution",
+            "BSM vs Heston", "MC vs BSM", "EU vs US Pricing", "Risk Analysis"
+        ])
+
+        render_volatility_tab(tab_vol, df, spot, hist_vol)
+        render_greeks_tabs(tab_greeks, df, spot, opt_type)
+        render_pnl_tab(tab_pnl, df, spot, opt_type, atm_idx)
+        render_attribution_tab(tab_attrib, df, spot, opt_type, atm_idx, rate, T, div_yield, days_to_exp)
+
+        render_heston_tab(tab_heston, df, spot, exp_date, opt_type, T, rate, div_yield, ticker, atm_iv)
+
+        render_mc_tab(tab_mc, df, spot, opt_type, atm_idx, rate, T, div_yield, hist_vol, ticker, exp_date)
+
+        render_pricing_tab(tab_pricing, df, spot, T, rate, div_yield, opt_type)
+
+        render_risk_tab(tab_risk, df, spot, opt_type, atm_idx, T, rate, div_yield, calls, puts)
+
+        surface_box = st.expander("3D Surfaces (Strike x Maturity)", expanded=False)
+        render_surfaces_section(surface_box, exp_options, ticker, spot, opt_type, rate, div_yield, hist_vol)
+
+    except Exception as e:
+        logger.exception("Vanilla pricer error")
+        st.error(f"Error: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
