@@ -74,21 +74,23 @@ class DataConnector:
     # =========================================================================
 
     @staticmethod
-    def get_spot_price(ticker_symbol: str) -> float:
+    def get_spot_price(ticker_symbol: str, force_refresh: bool = False) -> float:
         """
         Recupere le prix spot actuel.
 
         Args:
             ticker_symbol: Symbole Yahoo Finance (ex: "AAPL", "MSFT", "SPY")
+            force_refresh: Si True, ignore le cache (pour synchroniser avec les options)
 
         Returns:
             float: Prix spot actuel
         """
         ticker_symbol = ticker_symbol.upper().strip()
 
-        cached = _get_cached(f"spot_{ticker_symbol}")
-        if cached is not None:
-            return cached
+        if not force_refresh:
+            cached = _get_cached(f"spot_{ticker_symbol}")
+            if cached is not None:
+                return cached
 
         try:
             ticker = yf.Ticker(ticker_symbol)
@@ -118,6 +120,18 @@ class DataConnector:
         except Exception as e:
             logger.error(f"Erreur prix pour {ticker_symbol}: {e}")
             raise ValueError(f"Unable to retrieve price for '{ticker_symbol}': {e}")
+
+    @staticmethod
+    def get_option_chain_with_synced_spot(
+        ticker_symbol: str, expiration_date: str
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, float]:
+        """
+        Recupere la chaine d'options puis le spot (meme ordre que les quotes)
+        pour minimiser le decalage temporel spot vs options.
+        """
+        calls, puts = DataConnector.get_option_chain(ticker_symbol, expiration_date)
+        spot = DataConnector.get_spot_price(ticker_symbol, force_refresh=True)
+        return calls, puts, spot
 
     @staticmethod
     def get_market_data(ticker_symbol: str) -> Dict[str, Any]:
@@ -192,6 +206,42 @@ class DataConnector:
         except Exception as e:
             logger.error(f"Erreur market data pour {ticker_symbol}: {e}")
             raise ValueError(f"Unable to retrieve data for '{ticker_symbol}': {e}")
+
+    @staticmethod
+    def get_dividend_yield_forecast(ticker_symbol: str, spot: float) -> float:
+        """
+        Estime le dividend yield (forecast) a partir de l'historique Yahoo.
+        Utilise dividendYield/dividendRate si dispo, sinon somme des 4 derniers
+        dividendes / spot = yield annuel implicite.
+        """
+        ticker_symbol = ticker_symbol.upper().strip()
+        if spot <= 0:
+            return 0.0
+        try:
+            ticker = yf.Ticker(ticker_symbol)
+            info = ticker.info
+            div_yield = info.get('dividendYield')
+            if div_yield is not None:
+                div_yield = float(div_yield)
+                if 0 < div_yield <= 0.20:
+                    return div_yield
+                if div_yield > 0.15:
+                    annual_div = info.get('dividendRate', 0) or 0
+                    if annual_div > 0:
+                        return float(annual_div) / spot
+                    return div_yield / 100.0
+            annual_div = info.get('dividendRate', 0) or 0
+            if annual_div > 0:
+                return float(annual_div) / spot
+            divs = ticker.dividends
+            if divs is not None and len(divs) >= 1:
+                last_4 = divs.tail(4)
+                annual_est = float(last_4.sum())
+                if annual_est > 0:
+                    return annual_est / spot
+        except Exception as e:
+            logger.debug(f"Dividend forecast failed for {ticker_symbol}: {e}")
+        return 0.0
 
     # =========================================================================
     # Options

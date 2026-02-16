@@ -6,6 +6,7 @@ import streamlit as st
 from core import BlackScholes
 from core.heston import HestonModel
 from data import DataConnector, DataCleaner
+from config.options import MONEYNESS_MIN, MONEYNESS_MAX
 from models import BinomialTree, MonteCarloPricer
 from services import (
     build_expiration_options,
@@ -39,14 +40,8 @@ def render_volatility_strategies():
     """Volatility strategies pricer: straddle + strangle."""
     st.markdown("### Volatility Strategies - Live Data")
 
-    popular_tickers = {
-        "AAPL - Apple": "AAPL", "MSFT - Microsoft": "MSFT",
-        "TSLA - Tesla": "TSLA", "NVDA - NVIDIA": "NVDA",
-        "GOOGL - Google": "GOOGL", "AMZN - Amazon": "AMZN",
-        "META - Meta": "META", "SPY - S&P 500 ETF": "SPY",
-        "QQQ - Nasdaq 100 ETF": "QQQ", "IWM - Russell 2000": "IWM",
-        "GLD - Gold ETF": "GLD", "Custom": "CUSTOM"
-    }
+    from .tickers import POPULAR_TICKERS
+    popular_tickers = POPULAR_TICKERS
 
     top1, top2, top3 = st.columns([2, 2, 1])
     with top1:
@@ -86,21 +81,21 @@ def render_volatility_strategies():
         selected_exp = st.selectbox("Expiration", [e["label"] for e in exp_options], key="str_exp")
         exp_idx = [e["label"] for e in exp_options].index(selected_exp)
         exp_date = exp_options[exp_idx]["date"]
-        cal_days = exp_options[exp_idx]["days"]
-        T = max(cal_days / 365.0, 1e-6)
+        biz_days = exp_options[exp_idx].get("biz_days", exp_options[exp_idx]["days"])
+        T = max(biz_days / 252.0, 1e-6)
 
         with st.spinner(f"Loading option chain for {exp_date}..."):
             calls, puts = DataConnector.get_option_chain(ticker, exp_date)
         calls = DataCleaner.clean_option_chain(calls.copy(), min_bid=0.01)
         puts = DataCleaner.clean_option_chain(puts.copy(), min_bid=0.01)
-        calls = DataCleaner.filter_by_moneyness(calls, spot, 0.80, 1.25)
-        puts = DataCleaner.filter_by_moneyness(puts, spot, 0.75, 1.20)
+        calls = DataCleaner.filter_by_moneyness(calls, spot, MONEYNESS_MIN, MONEYNESS_MAX)
+        puts = DataCleaner.filter_by_moneyness(puts, spot, MONEYNESS_MIN, MONEYNESS_MAX)
         if len(calls) == 0 or len(puts) == 0:
             st.error("Insufficient liquid calls/puts for strategy construction.")
             return
 
         rate = DataConnector.get_risk_free_rate(T)
-        hist_vol = require_hist_vol_market_only(ticker, cal_days)
+        hist_vol = require_hist_vol_market_only(ticker, biz_days)
 
         calls_tbl = calls[["strike", "bid", "ask", "impliedVolatility", "volume", "openInterest"]].copy()
         puts_tbl = puts[["strike", "bid", "ask", "impliedVolatility", "volume", "openInterest"]].copy()
@@ -319,10 +314,10 @@ def render_volatility_strategies():
                 {"Model": "BSM (European)", "Price": premium_bsm, "Vs Market": premium_bsm - premium_market},
             ]
 
-            n_tree = st.slider("Binomial steps", 100, 500, 200, 50, key="str_tree_steps")
+            n_tree = st.slider("Binomial steps", 500, 1500, 500, 100, key="str_tree_steps")
             try:
-                tree_call = BinomialTree(spot, K_call, T, rate, sigma, "call", n_steps=n_tree, q=div_yield).price()
-                tree_put = BinomialTree(spot, K_put, T, rate, sigma, "put", n_steps=n_tree, q=div_yield).price()
+                tree_call = BinomialTree(spot, K_call, T, rate, sigma, "call", n_steps=n_tree, q=div_yield).price_american_cv(call_bs)
+                tree_put = BinomialTree(spot, K_put, T, rate, sigma, "put", n_steps=n_tree, q=div_yield).price_american_cv(put_bs)
                 tree_price = float(tree_call + tree_put)
                 p_rows.append({"Model": "Binomial (American)", "Price": tree_price, "Vs Market": tree_price - premium_market})
             except (ValueError, RuntimeError):

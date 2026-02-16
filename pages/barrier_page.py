@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from data import DataConnector, DataCleaner
+from config.options import MONEYNESS_MIN, MONEYNESS_MAX
 from instruments import BarrierOption
 from models import MonteCarloPricer
 from services import (
@@ -17,14 +18,8 @@ def render_barrier_pricer():
     """Barrier Option Pricer - live market, robust diagnostics."""
     st.markdown("### Barrier Option Pricer - Live Data")
 
-    popular_tickers = {
-        "AAPL - Apple": "AAPL", "MSFT - Microsoft": "MSFT",
-        "TSLA - Tesla": "TSLA", "NVDA - NVIDIA": "NVDA",
-        "GOOGL - Google": "GOOGL", "AMZN - Amazon": "AMZN",
-        "META - Meta": "META", "SPY - S&P 500 ETF": "SPY",
-        "QQQ - Nasdaq 100 ETF": "QQQ", "IWM - Russell 2000": "IWM",
-        "GLD - Gold ETF": "GLD", "Custom": "CUSTOM"
-    }
+    from .tickers import POPULAR_TICKERS
+    popular_tickers = POPULAR_TICKERS
 
     a1, a2 = st.columns([3, 1])
     with a1:
@@ -62,10 +57,10 @@ def render_barrier_pricer():
         selected_exp = st.selectbox("Expiration", [e["label"] for e in exp_options], key="br_exp")
         exp_idx = [e["label"] for e in exp_options].index(selected_exp)
         exp_date = exp_options[exp_idx]["date"]
-        cal_days = exp_options[exp_idx]["days"]
-        T = max(cal_days / 365.0, 1e-6)
+        biz_days = exp_options[exp_idx].get("biz_days", exp_options[exp_idx]["days"])
+        T = max(biz_days / 252.0, 1e-6)
         rate = DataConnector.get_risk_free_rate(T)
-        hist_vol = require_hist_vol_market_only(ticker, cal_days)
+        hist_vol = require_hist_vol_market_only(ticker, biz_days)
 
         option_type = st.radio("Option Type", ["call", "put"], horizontal=True, key="br_opt_type")
         barrier_type = st.selectbox(
@@ -78,7 +73,7 @@ def render_barrier_pricer():
             calls, puts = DataConnector.get_option_chain(ticker, exp_date)
         chain = (calls if option_type == "call" else puts).copy()
         chain = DataCleaner.clean_option_chain(chain, min_bid=0.01)
-        chain = DataCleaner.filter_by_moneyness(chain, spot, 0.80, 1.20)
+        chain = DataCleaner.filter_by_moneyness(chain, spot, MONEYNESS_MIN, MONEYNESS_MAX)
         if len(chain) == 0:
             st.error("No liquid strikes available for selected maturity.")
             return
@@ -368,12 +363,13 @@ def render_barrier_pricer():
             st.plotly_chart(fig_paths, use_container_width=True)
 
             fig_hist = go.Figure()
-            fig_hist.add_trace(go.Histogram(x=disc_payoff, nbinsx=60, marker_color="#636EFA", opacity=0.8))
+            fig_hist.add_trace(go.Histogram(x=disc_payoff, nbinsx=60, histnorm="percent",
+                                            marker_color="#636EFA", opacity=0.8))
             fig_hist.add_vline(x=float(np.mean(disc_payoff)), line_dash="dash", line_color="black",
                                annotation_text=f"Mean {np.mean(disc_payoff):.4f}")
             fig_hist.update_layout(
                 title="Discounted payoff distribution",
-                xaxis_title="Discounted payoff", yaxis_title="Frequency",
+                xaxis_title="Discounted payoff", yaxis_title="% of paths",
                 template="plotly_white", height=320
             )
             st.plotly_chart(fig_hist, use_container_width=True)

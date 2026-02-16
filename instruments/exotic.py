@@ -191,7 +191,7 @@ class BarrierOption:
                     n_simulations=n_simulations, n_steps=n_steps
                 )  # Moins de sims pour rapidité
                 prices.append(result['price'])
-            except:
+            except Exception:
                 prices.append(np.nan)
         
         return {

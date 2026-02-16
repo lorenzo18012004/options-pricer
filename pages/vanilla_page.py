@@ -10,12 +10,14 @@ logger = logging.getLogger(__name__)
 from core import BlackScholes, IVsolver
 from models import VolatilitySurface
 from data import DataConnector, DataCleaner
+from config.options import MAX_SPREAD_PCT, MONEYNESS_MIN, MONEYNESS_MAX
 from services import (
     build_expiration_options,
     load_market_snapshot,
     require_hist_vol_market_only,
 )
 from .vanilla_helpers import (
+    calibrate_market_from_put_call_parity,
     render_volatility_tab,
     render_greeks_tabs,
     render_pnl_tab,
@@ -36,17 +38,8 @@ def render_vanilla_option_pricer():
     st.markdown("### Vanilla Option Pricer - Live Data")
 
     # --- Asset & Expiration Selection ---
-    popular_tickers = {
-        "AAPL - Apple": "AAPL", "MSFT - Microsoft": "MSFT",
-        "TSLA - Tesla": "TSLA", "NVDA - NVIDIA": "NVDA",
-        "GOOGL - Google": "GOOGL", "AMZN - Amazon": "AMZN",
-        "META - Meta": "META", "SPY - S&P 500 ETF": "SPY",
-        "QQQ - Nasdaq 100 ETF": "QQQ", "BA - Boeing": "BA",
-        "JPM - JPMorgan": "JPM", "NFLX - Netflix": "NFLX",
-        "AMD - AMD": "AMD", "DIS - Disney": "DIS",
-        "GLD - Gold ETF": "GLD", "IWM - Russell 2000": "IWM",
-        "Custom": "CUSTOM"
-    }
+    from .tickers import POPULAR_TICKERS
+    popular_tickers = POPULAR_TICKERS
 
     col_sel1, col_sel2 = st.columns([3, 1])
     with col_sel1:
@@ -82,43 +75,59 @@ def render_vanilla_option_pricer():
         sel_idx = [e["label"] for e in exp_options].index(selected_exp)
         exp_date = exp_options[sel_idx]["date"]
         cal_days_to_exp = exp_options[sel_idx]["days"]
-        try:
-            today_np = np.datetime64(datetime.now().date())
-            exp_np = np.datetime64(datetime.strptime(exp_date, "%Y-%m-%d").date())
-            biz_days_to_exp = int(np.busday_count(today_np, exp_np))
-        except (ValueError, TypeError) as e:
-            logger.debug("Business days fallback: %s", e)
-            biz_days_to_exp = max(1, cal_days_to_exp)
+        biz_days_to_exp = exp_options[sel_idx].get("biz_days", cal_days_to_exp)
+        if biz_days_to_exp is None or biz_days_to_exp < 1:
+            try:
+                today_np = np.datetime64(datetime.now().date())
+                exp_np = np.datetime64(datetime.strptime(exp_date, "%Y-%m-%d").date())
+                biz_days_to_exp = max(1, int(np.busday_count(today_np, exp_np)))
+            except (ValueError, TypeError):
+                biz_days_to_exp = max(1, cal_days_to_exp)
 
-        # Desk strict convention for equity vanilla:
-        # - Maturity clock: calendar days
-        # - Day count basis: ACT/365
-        day_count_basis = "ACT/365"
-        maturity_mode = "Calendar days"
-        days_to_exp = max(1, cal_days_to_exp)
-        T = days_to_exp / 365.0
+        # Convention equity options : tout sur 252 (jours ouvrés, vol annualisee)
+        day_count_basis = "ACT/252"
+        maturity_mode = "Business days"
+        days_to_exp = max(1, biz_days_to_exp)
+        T = days_to_exp / 252.0
 
-        # Fetch rate, vol, chain
+        # Fetch rate, vol, chain (spot refetch apres chain pour sync avec quotes)
         with st.spinner("Loading options data..."):
-            rate = DataConnector.get_risk_free_rate(T)
+            rate_init = DataConnector.get_risk_free_rate(T)
+            if T > 1.0:
+                rate_init = max(rate_init, 0.035)
             hist_vol = require_hist_vol_market_only(ticker, max(1, biz_days_to_exp))
-            calls, puts = DataConnector.get_option_chain(ticker, exp_date)
-            if biz_days_to_exp < 14:
-                hv_window = 10
-            elif biz_days_to_exp < 45:
-                hv_window = 20
-            elif biz_days_to_exp < 90:
-                hv_window = 60
-            elif biz_days_to_exp < 180:
-                hv_window = 120
-            else:
-                hv_window = 252
+            calls, puts, spot_market = DataConnector.get_option_chain_with_synced_spot(ticker, exp_date)
+            div_yield_forecast = DataConnector.get_dividend_yield_forecast(ticker, spot_market)
+            spot, rate, div_yield = calibrate_market_from_put_call_parity(
+                calls, puts, spot_market, T, rate_init, div_yield,
+                div_yield_forecast=div_yield_forecast,
+                max_spread_pct=MAX_SPREAD_PCT, n_strikes_near_atm=10,
+            )
+        st.success(
+            f"**Market Calibrated** | Implied Rate: {rate*100:.2f}% | "
+            f"Implied Yield: {div_yield*100:.2f}% | Spot: ${spot:.2f}"
+        )
+        if T > 90 / 252.0 and div_yield < 0.001:
+            st.warning("**Check Dividend Data** — T > 90 days et Yield = 0%. Vérifier les dividendes.")
+        if biz_days_to_exp < 14:
+            hv_window = 10
+        elif biz_days_to_exp < 45:
+            hv_window = 20
+        elif biz_days_to_exp < 90:
+            hv_window = 60
+        elif biz_days_to_exp < 180:
+            hv_window = 120
+        else:
+            hv_window = 252
 
         option_type = st.radio("Option Type", ["Call", "Put"], horizontal=True)
         opt_type = option_type.lower()
         chain = (calls if opt_type == "call" else puts).copy()
         raw_chain = chain.copy()
         raw_count = len(raw_chain)
+        # Volume et OI sur TOUTE l'échéance (calls+puts), pas seulement les strikes affichés
+        total_volume_exp = int(calls["volume"].fillna(0).sum() + puts["volume"].fillna(0).sum())
+        total_oi_exp = int(calls["openInterest"].fillna(0).sum() + puts["openInterest"].fillna(0).sum())
         quote_ts = None
         if "lastTradeDate" in raw_chain.columns and len(raw_chain) > 0:
             try:
@@ -126,8 +135,9 @@ def render_vanilla_option_pricer():
             except (ValueError, TypeError, KeyError) as e:
                 logger.debug("Quote timestamp unavailable: %s", e)
                 quote_ts = None
-        chain = DataCleaner.clean_option_chain(chain, min_bid=0.01)
-        chain = DataCleaner.filter_by_moneyness(chain, spot, 0.80, 1.20)
+        chain_after_clean = DataCleaner.clean_option_chain(chain, min_bid=0.01)
+        count_after_clean = len(chain_after_clean)
+        chain = DataCleaner.filter_by_moneyness(chain_after_clean, spot, MONEYNESS_MIN, MONEYNESS_MAX)
         filtered_count = len(chain)
 
         if len(chain) == 0:
@@ -136,11 +146,7 @@ def render_vanilla_option_pricer():
 
         svi_params = None
         svi_fit_rmse_pct = None
-        use_svi_for_pricing = st.checkbox(
-            "Use SVI smoothed IV for pricing/Greeks",
-            value=True,
-            help="Desk-style: smooth noisy market IV before pricing and Greeks."
-        )
+        use_svi_for_pricing = True  # Auto: SVI si fit OK (RMSE <= 5%), sinon IV brute
         svi_mask = chain["impliedVolatility"].notna() & (chain["impliedVolatility"] > 0.01) & (chain["impliedVolatility"] < 3.0)
         if svi_mask.sum() >= 5:
             try:
@@ -159,6 +165,7 @@ def render_vanilla_option_pricer():
         for _, row in chain.iterrows():
             K = row["strike"]
             bid, ask = row["bid"], row["ask"]
+            # Mid = (Bid+Ask)/2 (priorité). Fallback Last si bid/ask nuls (rare après clean)
             mid = (bid + ask) / 2 if (bid + ask) > 0 else row.get("lastPrice", 0)
             if mid <= 0:
                 continue
@@ -177,17 +184,25 @@ def render_vanilla_option_pricer():
                 except (ValueError, TypeError, KeyError):
                     svi_iv = None
 
-            iv_used = svi_iv if (use_svi_for_pricing and svi_iv is not None) else market_iv
+            # Ne pas utiliser SVI si le fit est mauvais (RMSE > 5% = bruit excessif)
+            svi_usable = (
+                use_svi_for_pricing
+                and svi_iv is not None
+                and (svi_fit_rmse_pct is None or svi_fit_rmse_pct <= 5.0)
+            )
+            iv_used = svi_iv if svi_usable else market_iv
 
             model_price = BlackScholes.get_price(spot, K, T, rate, hist_vol, opt_type, div_yield)
             greeks = BlackScholes.get_all_greeks(spot, K, T, rate, iv_used, opt_type, div_yield)
 
             exec_cost = (ask - bid) / 2
 
+            spread_dollar = ask - bid
             results.append({
                 "Strike": K, "Moneyness": K / spot,
                 "Bid": bid, "Ask": ask, "Mid": mid,
                 "Spread_%": ((ask - bid) / mid * 100) if mid > 0 else 0,
+                "Spread_$": spread_dollar,
                 "IV_%": market_iv * 100, "SVI_IV_%": (svi_iv * 100) if svi_iv is not None else np.nan,
                 "IV_Used_%": iv_used * 100, "HV_%": hist_vol * 100,
                 "BS_Price": greeks["price"], "Model_HV": model_price,
@@ -213,13 +228,15 @@ def render_vanilla_option_pricer():
         atm_strike = df.loc[atm_idx, "Strike"]
         render_market_summary(
             summary_box, df, spot, atm_idx, days_to_exp, maturity_mode,
-            rate, atm_iv, atm_strike, hv_window, hist_vol, biz_days_to_exp
+            rate, atm_iv, atm_strike, hv_window, hist_vol, biz_days_to_exp,
+            total_volume_exp=total_volume_exp, total_oi_exp=total_oi_exp
         )
 
         dq_box = st.expander("Data Quality", expanded=False)
         render_data_quality(
             dq_box, df, raw_count, filtered_count, quote_ts, opt_type,
-            svi_fit_rmse_pct, day_count_basis
+            svi_fit_rmse_pct, day_count_basis,
+            count_after_clean=count_after_clean,
         )
 
         chain_box = st.expander(f"{option_type} Chain - {ticker} {exp_date}", expanded=False)
@@ -242,7 +259,7 @@ def render_vanilla_option_pricer():
 
         render_pricing_tab(tab_pricing, df, spot, T, rate, div_yield, opt_type)
 
-        render_risk_tab(tab_risk, df, spot, opt_type, atm_idx, T, rate, div_yield, calls, puts)
+        render_risk_tab(tab_risk, df, spot, opt_type, atm_idx, T, rate, div_yield, calls, puts, spot_market=spot_market)
 
         surface_box = st.expander("3D Surfaces (Strike x Maturity)", expanded=False)
         render_surfaces_section(surface_box, exp_options, ticker, spot, opt_type, rate, div_yield, hist_vol)

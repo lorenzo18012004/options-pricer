@@ -11,7 +11,7 @@ class BinomialTree:
     Modèle de Cox-Ross-Rubinstein (CRR).
     """
     
-    def __init__(self, S, K, T, r, sigma, option_type="call", n_steps=100, dividends=None, q=0.0):
+    def __init__(self, S, K, T, r, sigma, option_type="call", n_steps=500, dividends=None, q=0.0):
         """
         Args:
             S (float): Prix spot
@@ -129,6 +129,59 @@ class BinomialTree:
                 option_tree[j, i] = max(exercise_value, continuation_value)
         
         return option_tree[0, 0]
+    
+    def price_european(self):
+        """
+        Prix européen via l'arbre (sans exercice anticipé).
+        Utilisé pour le control variate.
+        """
+        stock_tree = self._build_stock_tree()
+        option_tree = np.zeros_like(stock_tree)
+        for j in range(self.n_steps + 1):
+            option_tree[j, self.n_steps] = self._get_payoff(stock_tree[j, self.n_steps])
+        for i in range(self.n_steps - 1, -1, -1):
+            for j in range(i + 1):
+                continuation_value = self.discount * (
+                    self.p * option_tree[j, i + 1] +
+                    (1 - self.p) * option_tree[j + 1, i + 1]
+                )
+                option_tree[j, i] = continuation_value  # Pas d'exercice anticipé
+        return option_tree[0, 0]
+    
+    def price_american_cv(self, bs_european: float) -> float:
+        """
+        Prix américain avec Control Variate + floor.
+        
+        Control variate : Error = BS_exact - Tree_european, puis
+        Price_CV = Price_American_Tree + Error.
+        
+        Floor : Price_American = max(Price_American_Tree, Price_European_BS)
+        """
+        amer_tree, euro_tree = self._price_american_and_european()
+        error = bs_european - euro_tree
+        price_cv = amer_tree + error
+        price_american = max(amer_tree, bs_european)
+        return max(price_cv, price_american)
+    
+    def _price_american_and_european(self) -> tuple:
+        """Calcule américain et européen en une seule passe (même arbre)."""
+        stock_tree = self._build_stock_tree()
+        amer_tree = np.zeros_like(stock_tree)
+        euro_tree = np.zeros_like(stock_tree)
+        for j in range(self.n_steps + 1):
+            payoff = self._get_payoff(stock_tree[j, self.n_steps])
+            amer_tree[j, self.n_steps] = euro_tree[j, self.n_steps] = payoff
+        for i in range(self.n_steps - 1, -1, -1):
+            for j in range(i + 1):
+                continuation = self.discount * (
+                    self.p * amer_tree[j, i + 1] + (1 - self.p) * amer_tree[j + 1, i + 1]
+                )
+                exercise = self._get_payoff(stock_tree[j, i])
+                amer_tree[j, i] = max(exercise, continuation)
+                euro_tree[j, i] = self.discount * (
+                    self.p * euro_tree[j, i + 1] + (1 - self.p) * euro_tree[j + 1, i + 1]
+                )
+        return amer_tree[0, 0], euro_tree[0, 0]
     
     def get_early_exercise_boundary(self):
         """

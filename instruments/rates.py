@@ -120,23 +120,29 @@ class VanillaSwap:
 class SwapCurveBuilder:
     """
     Construction de la courbe de taux à partir des instruments de marché.
-    
+
     Bootstrapping process:
     1. Dépôts court terme (1M, 3M, 6M)
     2. Futures (pour 1-2 ans)
     3. Swaps (pour 2-30 ans)
+
+    Pour une courbe Treasury uniquement, passer deposits={}, futures={}
+    et swaps={maturity_years: par_yield} (ex: {0.25: 0.04, 5.0: 0.05, 10.0: 0.05}).
     """
-    
+
     @staticmethod
     def build_from_market_data(deposits, futures, swaps):
         """
-        Construit la courbe de taux complète.
-        
+        Construit la courbe de taux complète par bootstrap des par yields.
+
+        Les trois dicts sont fusionnés : {maturity_years: par_yield}.
+        Passer {} pour deposits/futures si on n'a que des swaps/Treasury.
+
         Args:
-            deposits (dict): {maturity_years: rate}
-            futures (dict): {maturity_years: rate}
-            swaps (dict): {maturity_years: rate}
-        
+            deposits (dict): {maturity_years: rate} - peut être {}
+            futures (dict): {maturity_years: rate} - peut être {}
+            swaps (dict): {maturity_years: rate} - par yields (Treasury, swap rates)
+
         Returns:
             YieldCurve: Courbe de taux bootstrappée
         """

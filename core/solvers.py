@@ -1,5 +1,7 @@
 import numpy as np
 from scipy.optimize import brentq
+from scipy.stats import norm
+
 from core.black_scholes import BlackScholes
 
 
@@ -65,7 +67,7 @@ class IVsolver:
             
             # Vega (non normalise)
             d1, _ = BlackScholes._d1d2(S, K, T, r, sigma, q)
-            vega = S * np.exp(-q * T) * norm_pdf(d1) * np.sqrt(T)
+            vega = S * np.exp(-q * T) * norm.pdf(d1) * np.sqrt(T)
 
             if vega < 1e-12:
                 return None
@@ -98,8 +100,3 @@ class IVsolver:
 
         except (ValueError, RuntimeError):
             return None
-
-
-def norm_pdf(x):
-    """Standard normal PDF (plus rapide que scipy pour un scalaire)."""
-    return np.exp(-0.5 * x * x) / np.sqrt(2 * np.pi)

@@ -48,9 +48,12 @@ class VanillaOption:
         elif method == "tree":
             tree = BinomialTree(
                 self.S, self.K, self.T, self.r, self.sigma, 
-                self.option_type, n_steps=100, q=self.q
+                self.option_type, n_steps=1000, q=self.q
             )
-            return tree.price()
+            bs_european = BlackScholes.get_price(
+                self.S, self.K, self.T, self.r, self.sigma, self.option_type, self.q
+            )
+            return tree.price_american_cv(bs_european)
         else:
             raise ValueError(f"Method {method} not supported for {self.style}")
     

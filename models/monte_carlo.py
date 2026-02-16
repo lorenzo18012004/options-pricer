@@ -313,35 +313,37 @@ class MonteCarloPricer:
     def calculate_greeks_mc(self, option_type="call", bump_size=0.01):
         """
         Calcul des Grecs par différences finies (bumping).
-        
+
         Moins précis que les formules analytiques, mais fonctionne
         pour tous les produits exotiques.
-        
+
         Args:
             option_type (str): "call" ou "put"
             bump_size (float): Taille du bump pour les différences finies
-        
+
         Returns:
             dict: {'delta': delta, 'gamma': gamma, 'vega': vega}
         """
-        # Prix de base
-        base_price = self.price_european(option_type)['price']
-        
-        # Delta : bump du spot
-        self.S += bump_size
-        price_up = self.price_european(option_type)['price']
-        self.S -= 2 * bump_size
-        price_down = self.price_european(option_type)['price']
-        self.S += bump_size  # Restaurer
-        
-        delta = (price_up - price_down) / (2 * bump_size)
-        gamma = (price_up - 2 * base_price + price_down) / (bump_size ** 2)
-        
-        # Vega : bump de la vol
-        self.sigma += bump_size
-        price_vol_up = self.price_european(option_type)['price']
-        self.sigma -= bump_size  # Restaurer
-        
-        vega = (price_vol_up - base_price) / bump_size
-        
-        return {'delta': delta, 'gamma': gamma, 'vega': vega}
+        base_S, base_sigma = self.S, self.sigma
+        try:
+            # Prix de base
+            base_price = self.price_european(option_type)['price']
+
+            # Delta : bump du spot
+            self.S = base_S + bump_size
+            price_up = self.price_european(option_type)['price']
+            self.S = base_S - bump_size
+            price_down = self.price_european(option_type)['price']
+
+            delta = (price_up - price_down) / (2 * bump_size)
+            gamma = (price_up - 2 * base_price + price_down) / (bump_size ** 2)
+
+            # Vega : bump de la vol
+            self.S = base_S  # Restaurer S avant vega
+            self.sigma = base_sigma + bump_size
+            price_vol_up = self.price_european(option_type)['price']
+            vega = (price_vol_up - base_price) / bump_size
+
+            return {'delta': delta, 'gamma': gamma, 'vega': vega}
+        finally:
+            self.S, self.sigma = base_S, base_sigma

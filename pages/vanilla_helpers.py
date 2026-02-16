@@ -7,22 +7,41 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from scipy.optimize import minimize
 
 from core import BlackScholes
 from core.heston import HestonModel
 from data import DataCleaner, DataConnector
 from models import BinomialTree, MonteCarloPricer
+from config.options import (
+    MAX_SPREAD_PCT,
+    IV_MIN_PCT,
+    IV_MAX_PCT,
+    IV_CAP_DISPLAY_PCT,
+    MIN_VOLUME,
+    MIN_MID_PRICE,
+    BREACH_TOLERANCE_FLOOR,
+    BREACH_TOLERANCE_CAP,
+    BREACH_RATE_GOOD,
+    BREACH_RATE_WARNING,
+    MONEYNESS_SURFACE_MIN,
+    MONEYNESS_SURFACE_MAX,
+    SURFACE_SMOOTH_RBF,
+    SURFACE_GAUSSIAN_SIGMA,
+)
 
 
 def render_market_summary(summary_box, df, spot, atm_idx, days_to_exp, maturity_mode,
-                          rate, atm_iv, atm_strike, hv_window, hist_vol, biz_days_to_exp):
+                          rate, atm_iv, atm_strike, hv_window, hist_vol, biz_days_to_exp,
+                          total_volume_exp=None, total_oi_exp=None):
     """Render Market Summary expander."""
     with summary_box:
         c1, c2, c3, c4, c5, c6 = summary_box.columns(6)
         c1.metric("Spot", f"${spot:.2f}")
         c2.metric("ATM Strike", f"${atm_strike:.0f}")
         c3.metric("Days", f"{days_to_exp}", help=f"{maturity_mode} to expiry")
-        c4.metric("Rate", f"{rate*100:.2f}%")
+        c4.metric("Rate", f"{rate*100:.2f}%",
+                  help="Taux sans risque interpolé depuis la courbe Treasury US (Yahoo: ^IRX, ^FVX, ^TNX, ^TYX).")
         c5.metric("ATM IV", f"{atm_iv:.1f}%")
         c6.metric(f"Hist Vol ({hv_window}d)", f"{hist_vol*100:.1f}%",
                   help=f"{hv_window}d window matched to {biz_days_to_exp} business days to expiry")
@@ -30,19 +49,32 @@ def render_market_summary(summary_box, df, spot, atm_idx, days_to_exp, maturity_
         c7, c8, c9, c10 = summary_box.columns(4)
         c7.metric("IV - HV Spread", f"{iv_hv_spread:+.1f}%",
                   help="Positive = options are expensive vs realized vol")
-        c8.metric("Avg Spread", f"{df['Spread_%'].mean():.1f}%")
-        c9.metric("Total Volume", f"{df['Volume'].sum():,.0f}")
-        c10.metric("Total OI", f"{df['OpenInt'].sum():,.0f}")
+        # ATM spread (95-105% moneyness) plus représentatif que la moyenne sur tout le range
+        atm_mask = (df["Moneyness"] >= 0.95) & (df["Moneyness"] <= 1.05)
+        atm_spread_pct = df.loc[atm_mask, "Spread_%"].median() if atm_mask.any() else df["Spread_%"].median()
+        atm_spread_dollar = df.loc[atm_mask, "Spread_$"].median() if atm_mask.any() and "Spread_$" in df.columns else (df["Ask"] - df["Bid"]).median() if "Ask" in df.columns and "Bid" in df.columns else 0
+        c8.metric("ATM Spread", f"{atm_spread_pct:.1f}% (${atm_spread_dollar:.2f})",
+                  help="Médiane (Ask-Bid)/Mid et Ask-Bid en $ sur 95-105% moneyness. Plus robuste aux outliers.")
+        vol_val = total_volume_exp if total_volume_exp is not None else df["Volume"].sum()
+        oi_val = total_oi_exp if total_oi_exp is not None else df["OpenInt"].sum()
+        c9.metric("Total Volume", f"{vol_val:,.0f}",
+                  help="Volume du jour sur toute l'échéance (calls+puts). Yahoo intraday.")
+        c10.metric("Total OI", f"{oi_val:,.0f}",
+                   help="Open Interest sur toute l'échéance (calls+puts), clôture veille.")
 
 
 def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_type,
-                        svi_fit_rmse_pct, day_count_basis):
+                        svi_fit_rmse_pct, day_count_basis, count_after_clean=None):
     """Render Data Quality expander."""
     with dq_box:
+        retention_pct = (filtered_count / raw_count * 100) if raw_count > 0 else 0
         dq1, dq2, dq3, dq4 = dq_box.columns(4)
-        dq1.metric("Raw strikes", f"{raw_count}")
-        dq2.metric("Filtered strikes", f"{filtered_count}")
-        dq3.metric("Retention", f"{(filtered_count / raw_count * 100):.1f}%" if raw_count > 0 else "N/A")
+        dq1.metric("Raw strikes", f"{raw_count}",
+                   help="Tous les strikes retournés par Yahoo pour l'échéance.")
+        dq2.metric("Filtered strikes", f"{filtered_count}",
+                   help="Après clean + moneyness 80-120%.")
+        dq3.metric("Retention", f"{retention_pct:.1f}%",
+                   help="filtered / raw. Voir le funnel ci-dessous.")
         dq4.metric("Quote timestamp", quote_ts if quote_ts else "N/A")
         chk = df[["Strike", "Mid"]].dropna().sort_values("Strike").reset_index(drop=True)
         mono_breaches = 0
@@ -55,15 +87,18 @@ def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_typ
         dq5, dq6, dq7 = dq_box.columns(3)
         dq5.metric("Monotonicity breaches", f"{mono_breaches}")
         dq6.metric("Convexity breaches", f"{conv_breaches}")
-        dq7.metric("Avg spread (%)", f"{df['Spread_%'].mean():.2f}")
+        med_spread_dollar = df["Spread_$"].median() if "Spread_$" in df.columns else (df["Ask"] - df["Bid"]).median() if "Ask" in df.columns and "Bid" in df.columns else 0
+        dq7.metric("Med spread", f"{df['Spread_%'].median():.2f}% (${med_spread_dollar:.2f})",
+                   help="Médiane sur les strikes (80-120% moneyness). Plus robuste aux outliers que la moyenne.")
         dq8, dq9, dq10 = dq_box.columns(3)
-        dq8.metric("SVI fit RMSE", f"{svi_fit_rmse_pct:.3f}%" if svi_fit_rmse_pct is not None else "N/A")
+        dq8.metric("SVI fit RMSE", f"{svi_fit_rmse_pct:.3f}%" if svi_fit_rmse_pct is not None else "N/A",
+                   help="Si > 5%, fallback automatique sur IV marché (SVI trop bruité).")
         dq9.metric("Day count", day_count_basis)
         dq10.metric("Maturity clock", "Calendar")
         penalty = 0.0
         penalty += min(30.0, mono_breaches * 3.0)
         penalty += min(30.0, conv_breaches * 3.0)
-        penalty += min(20.0, max(0.0, df["Spread_%"].mean() - 8.0) * 0.8)
+        penalty += min(20.0, max(0.0, df["Spread_%"].median() - 8.0) * 0.8)
         if svi_fit_rmse_pct is not None:
             penalty += min(20.0, max(0.0, svi_fit_rmse_pct - 3.0) * 2.0)
         quality_score = max(0.0, 100.0 - penalty)
@@ -79,6 +114,25 @@ def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_typ
             dq_box.success("No-arbitrage quick checks: clean on filtered universe.")
         else:
             dq_box.warning("Some no-arbitrage checks fail.")
+        if count_after_clean is not None and raw_count > 0:
+            pct_clean = count_after_clean / raw_count * 100
+            pct_mny = filtered_count / count_after_clean * 100 if count_after_clean > 0 else 0
+            dq_box.markdown("**Funnel de rétention :**")
+            dq_box.markdown(
+                f"- **1. clean_option_chain** : {raw_count} → {count_after_clean} ({pct_clean:.1f}%)  "
+                f"*Exclut : bid/ask ≤ 1¢, spread > 50%, volume=0 ET OI=0*"
+            )
+            dq_box.markdown(
+                f"- **2. filter_by_moneyness(80-120%)** : {count_after_clean} → {filtered_count} ({pct_mny:.1f}%)  "
+                f"*Zone liquide ATM. Les strikes OTM lointains (ex: K=0.5×S ou 1.5×S) sont illiquides.*"
+            )
+            dq_box.caption(
+                "Justification : Les options 80-120% moneyness concentrent la liquidité (volume, OI, spread serré). "
+                "Les deep OTM ont des IV bruitées et des mid peu fiables. Pour élargir : modifier filter_by_moneyness."
+            )
+        dq_box.caption(
+            "Mid = (Bid+Ask)/2. Yahoo Finance: bid/ask ~15min delayed → spreads plus larges qu'en temps réel."
+        )
 
 
 def render_chain_display(chain_box, df, option_type, ticker, exp_date):
@@ -87,7 +141,8 @@ def render_chain_display(chain_box, df, option_type, ticker, exp_date):
         fmt = {
             "Strike": "${:.2f}", "Moneyness": "{:.3f}",
             "Bid": "${:.2f}", "Ask": "${:.2f}", "Mid": "${:.2f}",
-            "Spread_%": "{:.1f}%", "IV_%": "{:.1f}%", "SVI_IV_%": "{:.1f}%", "IV_Used_%": "{:.1f}%", "HV_%": "{:.1f}%",
+            "Spread_%": "{:.1f}%", "Spread_$": "${:.2f}",
+            "IV_%": "{:.1f}%", "SVI_IV_%": "{:.1f}%", "IV_Used_%": "{:.1f}%", "HV_%": "{:.1f}%",
             "BS_Price": "${:.2f}", "Model_HV": "${:.2f}", "Mispricing": "${:+.2f}",
             "Delta": "{:+.3f}", "Gamma": "{:.5f}", "Vega": "{:.3f}",
             "Theta": "{:+.3f}", "Rho": "{:+.4f}",
@@ -245,29 +300,51 @@ def render_greeks_tabs(tab, df, spot, opt_type):
 
 
 def render_pnl_tab(tab, df, spot, opt_type, atm_idx):
-    """Render P&L at expiration chart."""
+    """Render P&L at expiration chart (Long et Short)."""
     MULTIPLIER = 100
     with tab:
         col_pnl1, col_pnl2 = st.columns([1, 3])
         with col_pnl1:
+            position = st.radio("Position", ["Long", "Short"], horizontal=True, key="pnl_position")
+            is_long = position == "Long"
             pnl_strike = st.selectbox("Strike for P&L",
                                       df["Strike"].tolist(), index=int(atm_idx))
             pnl_row = df[df["Strike"] == pnl_strike].iloc[0]
             n_contracts = st.number_input("Contracts", value=1, min_value=1, max_value=100)
 
-            entry_price_ask = pnl_row["Ask"]
+            if is_long:
+                entry_price = pnl_row["Ask"]
+                entry_label = "Entry (Ask)"
+            else:
+                entry_price = pnl_row["Bid"]
+                entry_label = "Entry (Bid)"
             premium_mid = pnl_row["Mid"]
             spread_cost = (pnl_row["Ask"] - pnl_row["Bid"]) / 2
 
-            st.metric("Entry (Ask)", f"${entry_price_ask:.2f}")
+            st.metric(entry_label, f"${entry_price:.2f}")
             st.metric("Mid Price", f"${premium_mid:.2f}")
             st.metric("Spread Cost", f"${spread_cost:.2f}/share")
-            st.metric("Total Cost", f"${entry_price_ask * MULTIPLIER * n_contracts:,.0f}",
-                      help=f"{n_contracts} x {MULTIPLIER} x ${entry_price_ask:.2f}")
+            if is_long:
+                st.metric("Total Cost", f"${entry_price * MULTIPLIER * n_contracts:,.0f}",
+                          help=f"{n_contracts} x {MULTIPLIER} x ${entry_price:.2f}")
+            else:
+                st.metric("Total Credit", f"${entry_price * MULTIPLIER * n_contracts:,.0f}",
+                          help=f"{n_contracts} x {MULTIPLIER} x ${entry_price:.2f} (reçu)")
 
-            be = (pnl_strike + entry_price_ask) if opt_type == "call" else (pnl_strike - entry_price_ask)
+            if opt_type == "call":
+                be = pnl_strike + entry_price
+            else:
+                be = pnl_strike - entry_price
             st.metric("Breakeven", f"${be:.2f}")
-            st.metric("Max Loss", f"${entry_price_ask * MULTIPLIER * n_contracts:,.0f}")
+            if is_long:
+                st.metric("Max Loss", f"${entry_price * MULTIPLIER * n_contracts:,.0f}")
+            else:
+                if opt_type == "call":
+                    st.metric("Max Loss", "Illimité", help="Short call: perte illimitée si spot monte")
+                else:
+                    max_loss_put = (pnl_strike - entry_price) * MULTIPLIER * n_contracts
+                    st.metric("Max Loss", f"${max_loss_put:,.0f}",
+                              help="Short put: perte max si spot → 0")
 
         with col_pnl2:
             spot_range = np.linspace(spot * 0.7, spot * 1.3, 200)
@@ -275,13 +352,18 @@ def render_pnl_tab(tab, df, spot, opt_type, atm_idx):
                 payoff = np.maximum(spot_range - pnl_strike, 0)
             else:
                 payoff = np.maximum(pnl_strike - spot_range, 0)
-            pnl_vals = (payoff - entry_price_ask) * MULTIPLIER * n_contracts
+            if is_long:
+                pnl_vals = (payoff - entry_price) * MULTIPLIER * n_contracts
+            else:
+                pnl_vals = (entry_price - payoff) * MULTIPLIER * n_contracts
 
             fig_pnl = go.Figure()
+            line_color = "#3498db" if is_long else "#e74c3c"
+            fill_color = "rgba(46,204,113,0.15)" if is_long else "rgba(231,76,60,0.15)"
             fig_pnl.add_trace(go.Scatter(
                 x=spot_range, y=pnl_vals, mode="lines",
-                name="P&L (contract)", line=dict(color="#3498db", width=3),
-                fill="tozeroy", fillcolor="rgba(46,204,113,0.15)"
+                name=f"P&L {position}", line=dict(color=line_color, width=3),
+                fill="tozeroy", fillcolor=fill_color
             ))
             fig_pnl.add_hline(y=0, line_color="gray", line_width=1)
             fig_pnl.add_vline(x=spot, line_dash="dot", line_color="red",
@@ -292,7 +374,7 @@ def render_pnl_tab(tab, df, spot, opt_type, atm_idx):
                              annotation_text=f"BE={be:.0f}")
             option_type = "Call" if opt_type == "call" else "Put"
             fig_pnl.update_layout(
-                title=f"P&L at Expiration - {n_contracts} {option_type}(s) K={pnl_strike:.0f} (x{MULTIPLIER})",
+                title=f"P&L at Expiration - {position} {n_contracts} {option_type}(s) K={pnl_strike:.0f} (x{MULTIPLIER})",
                 xaxis_title="Spot at Expiration",
                 yaxis_title=f"P&L ($) - {n_contracts} contract(s)",
                 template="plotly_white", height=450
@@ -557,6 +639,7 @@ def render_mc_tab(tab, df, spot, opt_type, atm_idx, rate, T, div_yield, hist_vol
                 fig_hist = go.Figure()
                 fig_hist.add_trace(go.Histogram(
                     x=mc_state["discounted_payoffs"], nbinsx=60,
+                    histnorm="percent",
                     name="Discounted payoff distribution",
                     marker_color="#636EFA", opacity=0.75
                 ))
@@ -566,7 +649,7 @@ def render_mc_tab(tab, df, spot, opt_type, atm_idx, rate, T, div_yield, hist_vol
                                    annotation_text=f"BSM {bsm_price_mc:.4f}")
                 fig_hist.update_layout(
                     title="MC Discounted Payoff Distribution",
-                    xaxis_title="Discounted payoff", yaxis_title="Frequency",
+                    xaxis_title="Discounted payoff", yaxis_title="% of paths",
                     template="plotly_white", height=340, barmode="overlay"
                 )
                 st.plotly_chart(fig_hist, use_container_width=True)
@@ -596,6 +679,7 @@ def render_mc_tab(tab, df, spot, opt_type, atm_idx, rate, T, div_yield, hist_vol
                 fig_st = go.Figure()
                 fig_st.add_trace(go.Histogram(
                     x=mc_state["final_prices"], nbinsx=60,
+                    histnorm="percent",
                     name="S(T) distribution", marker_color="#7f8c8d", opacity=0.8
                 ))
                 fig_st.add_vline(x=spot, line_dash="dot", line_color="gray",
@@ -604,7 +688,7 @@ def render_mc_tab(tab, df, spot, opt_type, atm_idx, rate, T, div_yield, hist_vol
                                  annotation_text=f"K {mc_strike:.0f}")
                 fig_st.update_layout(
                     title="Terminal Price Distribution S(T)",
-                    xaxis_title="S(T)", yaxis_title="Frequency",
+                    xaxis_title="S(T)", yaxis_title="% of paths",
                     template="plotly_white", height=330
                 )
                 st.plotly_chart(fig_st, use_container_width=True)
@@ -633,14 +717,14 @@ def render_pricing_tab(tab, df, spot, T, rate, div_yield, opt_type):
     with tab:
         am_results = []
         sample_strikes = df["Strike"].tolist()[::max(1, len(df) // 8)]
-        with st.spinner("Computing American prices (Binomial Tree 200 steps)..."):
+        with st.spinner("Computing American prices (Binomial 1000 steps + Control Variate)..."):
             for K in sample_strikes:
                 row_data = df[df["Strike"] == K].iloc[0]
                 iv = row_data["IV_%"] / 100
                 euro_price = BlackScholes.get_price(spot, K, T, rate, iv, opt_type, div_yield)
                 try:
-                    tree = BinomialTree(spot, K, T, rate, iv, opt_type, n_steps=200, q=div_yield)
-                    amer_price = tree.price()
+                    tree = BinomialTree(spot, K, T, rate, iv, opt_type, n_steps=1000, q=div_yield)
+                    amer_price = tree.price_american_cv(euro_price)
                 except (ValueError, RuntimeError):
                     amer_price = euro_price
                 ee_premium = amer_price - euro_price
@@ -650,20 +734,114 @@ def render_pricing_tab(tab, df, spot, T, rate, div_yield, opt_type):
                     "EE Premium %": (ee_premium / euro_price * 100) if euro_price > 0 else 0
                 })
         df_am = pd.DataFrame(am_results)
+        # Seuil significatif: rouge seulement si EE > $0.05 ou > 1% du prix EU
+        ee_threshold = max(0.05, 0.01 * df_am["European (BS)"].max() if len(df_am) else 0.05)
         st.dataframe(
             df_am.style.format({
                 "Strike": "${:.2f}", "European (BS)": "${:.4f}",
                 "American (Tree)": "${:.4f}", "EE Premium": "${:+.4f}",
                 "EE Premium %": "{:+.2f}%"
-            }).background_gradient(subset=["EE Premium"], cmap="YlOrRd"),
+            }).background_gradient(subset=["EE Premium"], cmap="YlOrRd", vmin=0, vmax=ee_threshold),
             use_container_width=True
         )
 
 
-def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls, puts):
-    """Render Risk Analysis tab (Scenario + Put-Call Parity)."""
+def calibrate_market_from_put_call_parity(
+    calls: pd.DataFrame,
+    puts: pd.DataFrame,
+    spot_market: float,
+    T: float,
+    rate_init: float,
+    div_yield_init: float,
+    div_yield_forecast: float = 0.0,
+    max_spread_pct: float = None,
+    n_strikes_near_atm: int = 10,
+) -> tuple:
+    """
+    Calibre r, q, S par regression sur la parite Put-Call: C - P = S*e^(-qT) - K*e^(-rT).
+    - Utilise div_yield_forecast (historique) comme point de depart si div_yield_init = 0.
+    - Contraint r proche du taux marche (Treasury) et rejette l'excedent dans q.
+    """
+    if max_spread_pct is None:
+        max_spread_pct = MAX_SPREAD_PCT
+    q_init = div_yield_init if div_yield_init > 0.001 else max(div_yield_init, div_yield_forecast)
+    try:
+        calls_c = DataCleaner.clean_option_chain(calls.copy(), min_bid=0.01)
+        puts_c = DataCleaner.clean_option_chain(puts.copy(), min_bid=0.01)
+        calls_c = calls_c[["strike", "bid", "ask"]].rename(
+            columns={"bid": "call_bid", "ask": "call_ask"}
+        )
+        puts_c = puts_c[["strike", "bid", "ask"]].rename(
+            columns={"bid": "put_bid", "ask": "put_ask"}
+        )
+        merged = pd.merge(calls_c, puts_c, on="strike")
+        merged["call_mid"] = (merged["call_bid"] + merged["call_ask"]) / 2
+        merged["put_mid"] = (merged["put_bid"] + merged["put_ask"]) / 2
+        merged = merged[(merged["call_mid"] > 0) & (merged["put_mid"] > 0)]
+        merged["call_spread_pct"] = (merged["call_ask"] - merged["call_bid"]) / merged["call_mid"]
+        merged["put_spread_pct"] = (merged["put_ask"] - merged["put_bid"]) / merged["put_mid"]
+        merged["cp_market"] = merged["call_mid"] - merged["put_mid"]
+        merged["dist_to_atm"] = (merged["strike"] - spot_market).abs()
+        merged = merged[
+            (merged["call_spread_pct"] <= max_spread_pct) &
+            (merged["put_spread_pct"] <= max_spread_pct)
+        ]
+        merged = merged.nsmallest(n_strikes_near_atm, "dist_to_atm")
+        if len(merged) < 5:
+            return spot_market, rate_init, q_init
+
+        K_arr = merged["strike"].values.astype(float)
+        cp_arr = merged["cp_market"].values.astype(float)
+
+        # r fixe = taux marche (Treasury), optimise q et S. L'excedent va dans le yield.
+        def objective_qs(x):
+            q, S = x[0], x[1]
+            theory = S * np.exp(-q * T) - K_arr * np.exp(-rate_init * T)
+            return float(np.sum((cp_arr - theory) ** 2))
+
+        x0_qs = [q_init, spot_market]
+        bounds_qs = [
+            (0.0, 0.20),
+            (spot_market * 0.5, spot_market * 2.0),
+        ]
+        res = minimize(objective_qs, x0_qs, method="L-BFGS-B", bounds=bounds_qs)
+        if res.success:
+            q_impl, S_impl = res.x
+            if 0 <= q_impl <= 0.20 and spot_market * 0.5 <= S_impl <= spot_market * 2:
+                return float(S_impl), float(rate_init), float(q_impl)
+
+        # Fallback: regression complete avec penalite forte sur (r - rate_init)^2
+        def objective_full(x):
+            r, q, S = x[0], x[1], x[2]
+            theory = S * np.exp(-q * T) - K_arr * np.exp(-r * T)
+            ssr = np.sum((cp_arr - theory) ** 2)
+            penalty = 50000.0 * (r - rate_init) ** 2
+            return float(ssr + penalty)
+
+        x0 = [rate_init, q_init, spot_market]
+        bounds = [
+            (max(0.001, rate_init - 0.02), min(0.20, rate_init + 0.02)),
+            (0.0, 0.20),
+            (spot_market * 0.5, spot_market * 2.0),
+        ]
+        res = minimize(objective_full, x0, method="L-BFGS-B", bounds=bounds)
+        if not res.success:
+            return spot_market, rate_init, q_init
+        r_impl, q_impl, S_impl = res.x
+        if not (0.001 <= r_impl <= 0.20 and 0 <= q_impl <= 0.20 and spot_market * 0.5 <= S_impl <= spot_market * 2):
+            return spot_market, rate_init, q_init
+        return float(S_impl), float(r_impl), float(q_impl)
+    except Exception:
+        return spot_market, rate_init, q_init
+
+
+def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls, puts, spot_market=None):
+    """Render Risk Analysis tab (Scenario + Put-Call Parity).
+    spot_market: underlying spot from ticker (for parity check). If None, uses spot (calibrated).
+    """
     import logging
     logger = logging.getLogger(__name__)
+    spot_underlying = spot_market if spot_market is not None else spot
     with tab:
         tab_scenario, tab_parity = st.tabs(["Scenario Analysis", "Put-Call Parity"])
         with tab_scenario:
@@ -673,7 +851,10 @@ def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls,
                                          index=int(atm_idx), key="sc_strike")
                 sc_row = df[df["Strike"] == sc_strike].iloc[0]
                 sc_iv = sc_row["IV_%"] / 100
-                st.caption(f"Current: ${sc_row['Mid']:.2f} | IV: {sc_iv*100:.1f}%")
+                st.caption(
+                    f"**Current (Spot):** ${spot_underlying:.2f} | "
+                    f"Option Mid: ${sc_row['Mid']:.2f} | IV: {sc_iv*100:.1f}%"
+                )
             with col_sc2:
                 spot_shocks = np.linspace(-15, 15, 13)
                 vol_shocks = np.linspace(-10, 10, 9)
@@ -701,15 +882,6 @@ def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls,
                 )
                 st.plotly_chart(fig_scenario, use_container_width=True)
         with tab_parity:
-            f1, f2, f3, f4 = st.columns(4)
-            with f1:
-                min_mny = st.slider("Min moneyness", 0.70, 1.00, 0.90, 0.01, key="pc_min_mny")
-            with f2:
-                max_mny = st.slider("Max moneyness", 1.00, 1.30, 1.10, 0.01, key="pc_max_mny")
-            with f3:
-                max_spread = st.slider("Max spread (%)", 5, 100, 30, 5, key="pc_max_spread") / 100
-            with f4:
-                min_oi = st.slider("Min open interest", 0, 1000, 50, 10, key="pc_min_oi")
             try:
                 calls_pc = DataCleaner.clean_option_chain(calls.copy(), min_bid=0.01)
                 puts_pc = DataCleaner.clean_option_chain(puts.copy(), min_bid=0.01)
@@ -723,40 +895,55 @@ def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls,
                 merged = merged[(merged["call_mid"] > 0) & (merged["put_mid"] > 0)]
                 merged["call_spread_pct"] = (merged["call_ask"] - merged["call_bid"]) / merged["call_mid"]
                 merged["put_spread_pct"] = (merged["put_ask"] - merged["put_bid"]) / merged["put_mid"]
-                merged["moneyness"] = merged["strike"] / spot
+                # Use underlying spot for moneyness & parity (consistent with ticker data)
+                spot_parity = spot_underlying
+                merged["moneyness"] = merged["strike"] / spot_parity  # K/S: 1=ATM, <1=ITM call, >1=ITM put
+                merged["dist_to_atm"] = (merged["strike"] - spot_parity).abs()
+                # Filtres auto: spread < 15%, top 10 strikes proches ATM
                 merged = merged[
-                    (merged["moneyness"] >= min_mny) &
-                    (merged["moneyness"] <= max_mny) &
-                    (merged["call_spread_pct"] <= max_spread) &
-                    (merged["put_spread_pct"] <= max_spread) &
-                    ((merged["call_oi"] >= min_oi) | (merged["put_oi"] >= min_oi))
+                    (merged["call_spread_pct"] <= MAX_SPREAD_PCT) &
+                    (merged["put_spread_pct"] <= MAX_SPREAD_PCT)
                 ]
+                merged = merged.nsmallest(10, "dist_to_atm")
                 parity_results = []
                 for _, row in merged.iterrows():
                     K_pc = row["strike"]
                     call_mid = row["call_mid"]
                     put_mid = row["put_mid"]
                     market = call_mid - put_mid
-                    cp_theory_eu = spot * np.exp(-div_yield * T) - K_pc * np.exp(-rate * T)
+                    # EU Theory: C - P = S*e^(-qT) - K*e^(-rT)
+                    cp_theory_eu = spot_parity * np.exp(-div_yield * T) - K_pc * np.exp(-rate * T)
                     deviation_eu = market - cp_theory_eu
-                    lb_amer = spot * np.exp(-div_yield * T) - K_pc
-                    ub_amer = spot - K_pc * np.exp(-rate * T)
+                    # Bornes americaines: lb = S*exp(-q*T)-K, ub = S-K*exp(-r*T)
+                    lb_amer = spot_parity * np.exp(-div_yield * T) - K_pc
+                    ub_amer = spot_parity - K_pc * np.exp(-rate * T)
                     if lb_amer > ub_amer:
                         lb_amer, ub_amer = ub_amer, lb_amer
                     breach = (market - lb_amer) if market < lb_amer else ((market - ub_amer) if market > ub_amer else 0.0)
+                    # Tolerance: breach compte seulement si |breach| > demi-spread (C-P)
+                    call_spread = row["call_ask"] - row["call_bid"]
+                    put_spread = row["put_ask"] - row["put_bid"]
+                    tolerance = min(
+                        max(0.5 * (call_spread + put_spread), BREACH_TOLERANCE_FLOOR),
+                        BREACH_TOLERANCE_CAP,
+                    )
                     parity_results.append({
                         "Strike": K_pc, "Mny": row["moneyness"],
                         "Call Mid": call_mid, "Put Mid": put_mid,
                         "C-P Market": market, "EU Theory": cp_theory_eu,
                         "EU Dev": deviation_eu, "Amer LB": lb_amer, "Amer UB": ub_amer,
-                        "Breach $": breach, "Dev % Spot": (deviation_eu / spot) * 100,
+                        "Breach $": breach, "Tolerance": tolerance,
+                        "Dev % Spot": (deviation_eu / spot_parity) * 100,
                     })
-                if parity_results:
+                if not parity_results:
+                    st.info(f"Aucun strike liquide (spread < {MAX_SPREAD_PCT*100:.0f}%) trouvé pour la parité.")
+                elif parity_results:
                     df_parity = pd.DataFrame(parity_results)
                     col_pc1, col_pc2 = st.columns(2)
                     with col_pc1:
+                        df_display = df_parity.drop(columns=["Tolerance"], errors="ignore")
                         st.dataframe(
-                            df_parity.style.format({
+                            df_display.style.format({
                                 "Strike": "${:.2f}", "Mny": "{:.3f}",
                                 "Call Mid": "${:.2f}", "Put Mid": "${:.2f}",
                                 "C-P Market": "${:+.2f}", "EU Theory": "${:+.2f}",
@@ -771,8 +958,10 @@ def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls,
                         fig_pc = go.Figure()
                         fig_pc.add_trace(go.Bar(
                             x=df_parity["Strike"], y=df_parity["Breach $"],
-                            marker_color=["#2ecc71" if abs(d) < 1e-8 else "#e74c3c"
-                                          for d in df_parity["Breach $"]]
+                            marker_color=[
+                                "#2ecc71" if abs(d) <= tol else "#e74c3c"
+                                for d, tol in zip(df_parity["Breach $"], df_parity["Tolerance"])
+                            ]
                         ))
                         fig_pc.add_hline(y=0, line_color="gray")
                         fig_pc.update_layout(
@@ -782,14 +971,22 @@ def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls,
                         )
                         st.plotly_chart(fig_pc, use_container_width=True)
                     avg_dev_eu = df_parity["EU Dev"].abs().mean()
-                    breach_rate = float((df_parity["Breach $"].abs() > 1e-8).mean() * 100)
+                    # Breach compte seulement si |breach| > tolerance (demi-spread)
+                    breach_count = (df_parity["Breach $"].abs() > df_parity["Tolerance"]).sum()
+                    breach_rate = float(breach_count / len(df_parity) * 100)
                     s1, s2, s3 = st.columns(3)
                     s1.metric("Filtered strikes", f"{len(df_parity)}")
                     s2.metric("Avg |EU Dev|", f"${avg_dev_eu:.3f}")
                     s3.metric("Amer bounds breach rate", f"{breach_rate:.1f}%")
-                    if breach_rate < 5:
+                    st.caption(
+                        f"Breach = hors bornes et |écart| > tolérance "
+                        f"(plancher ${BREACH_TOLERANCE_FLOOR:.2f}, plafond ${BREACH_TOLERANCE_CAP:.2f}). "
+                        "Mny = K/S (1=ATM, <1=ITM call, >1=ITM put). "
+                        "EU Theory: C−P = S·e^(-qT) − K·e^(-rT). Spot = underlying from ticker."
+                    )
+                    if breach_rate < BREACH_RATE_GOOD:
                         st.success("Desk check: OK")
-                    elif breach_rate < 20:
+                    elif breach_rate < BREACH_RATE_WARNING:
                         st.warning("Desk check: some breaches")
                     else:
                         st.error("Desk check: many breaches")
@@ -806,19 +1003,28 @@ def render_surfaces_section(surface_box, exp_options, ticker, spot, opt_type, ra
         exps_to_use = [e for e in exp_options[:8] if e["days"] > 0]
         for exp_info in exps_to_use:
             exp_d = exp_info["date"]
-            T_exp = exp_info["days"] / 365.0
+            biz_d = exp_info.get("biz_days", exp_info["days"])
+            T_exp = biz_d / 252.0
             try:
                 c_chain, p_chain = DataConnector.get_option_chain(ticker, exp_d)
                 chain_exp = (c_chain if opt_type == "call" else p_chain).copy()
-                chain_exp = DataCleaner.clean_option_chain(chain_exp, min_bid=0.01)
-                chain_exp = DataCleaner.filter_by_moneyness(chain_exp, spot, 0.85, 1.15)
+                chain_exp = DataCleaner.clean_option_chain(chain_exp, min_bid=0.01, max_spread_pct=0.5)
+                chain_exp = DataCleaner.filter_by_moneyness(
+                    chain_exp, spot, MONEYNESS_SURFACE_MIN, MONEYNESS_SURFACE_MAX
+                )
+                chain_exp = DataCleaner.filter_surface_quality(
+                    chain_exp, min_volume=MIN_VOLUME,
+                )
                 for _, row in chain_exp.iterrows():
                     K = row["strike"]
                     iv = row.get("impliedVolatility", None)
                     if iv is None or iv <= 0:
                         continue
+                    # IV outlier removal: exclude IV > 80% or < 5%
+                    if iv > IV_MAX_PCT or iv < IV_MIN_PCT:
+                        continue
                     mid = (row["bid"] + row["ask"]) / 2
-                    if mid <= 0:
+                    if mid < MIN_MID_PRICE:
                         continue
                     greeks_3d = BlackScholes.get_all_greeks(
                         spot, K, T_exp, rate, iv, opt_type, div_yield)
@@ -878,17 +1084,36 @@ def render_surfaces_section(surface_box, exp_options, ticker, spot, opt_type, ra
     strikes_unique = sorted(df_surf["Strike"].unique())
     days_unique = sorted(df_surf["Days"].unique())
 
-    def build_surface_grid(df_s, value_col):
-        from scipy.interpolate import griddata
-        xi = np.linspace(min(strikes_unique), max(strikes_unique), 40)
-        yi = np.linspace(min(days_unique), max(days_unique), 20)
+    def build_surface_grid(df_s, value_col, smooth=None, iv_cap_pct=None, gaussian_sigma=None):
+        """Interpolation RBF + Gaussian smoothing + plafond IV pour eviter pics."""
+        from scipy.interpolate import RBFInterpolator
+        from scipy.ndimage import gaussian_filter
+        if smooth is None:
+            smooth = SURFACE_SMOOTH_RBF
+        if iv_cap_pct is None:
+            iv_cap_pct = IV_CAP_DISPLAY_PCT
+        if gaussian_sigma is None:
+            gaussian_sigma = SURFACE_GAUSSIAN_SIGMA
+        pts = np.column_stack([df_s["Strike"].values, df_s["Days"].values])
+        vals = df_s[value_col].values.astype(float)
+        xi = np.linspace(min(strikes_unique), max(strikes_unique), 50)
+        yi = np.linspace(min(days_unique), max(days_unique), 25)
         xi_grid, yi_grid = np.meshgrid(xi, yi)
-        zi_grid = griddata(
-            (df_s["Strike"].values, df_s["Days"].values),
-            df_s[value_col].values,
-            (xi_grid, yi_grid), method="cubic"
-        )
+        grid_pts = np.column_stack([xi_grid.ravel(), yi_grid.ravel()])
+        try:
+            rbf = RBFInterpolator(pts, vals, kernel="thin_plate_spline", smoothing=smooth)
+            zi_grid = rbf(grid_pts).reshape(xi_grid.shape)
+        except Exception:
+            from scipy.interpolate import griddata
+            zi_grid = griddata(
+                pts, vals, (xi_grid, yi_grid), method="cubic"
+            )
         zi_grid = np.nan_to_num(zi_grid, nan=0.0, posinf=0.0, neginf=0.0)
+        # Gaussian smoothing for IV and Theta surfaces
+        if value_col in ("IV", "Theta") and gaussian_sigma > 0:
+            zi_grid = gaussian_filter(zi_grid, sigma=gaussian_sigma, mode="nearest")
+        if value_col == "IV":
+            zi_grid = np.clip(zi_grid, 0, iv_cap_pct)
         return xi, yi, zi_grid
 
     (tab_iv, tab_delta, tab_gamma, tab_vega, tab_theta,
@@ -909,19 +1134,28 @@ def render_surfaces_section(surface_box, exp_options, ticker, spot, opt_type, ra
     for tab, col_name, z_label, colorscale in surface_configs:
         with tab:
             try:
-                xi, yi, zi = build_surface_grid(df_surf, col_name)
+                xi, yi, zi = build_surface_grid(
+                    df_surf, col_name,
+                    iv_cap_pct=IV_CAP_DISPLAY_PCT if col_name == "IV" else 999.0,
+                    gaussian_sigma=SURFACE_GAUSSIAN_SIGMA if col_name in ("IV", "Theta") else 0.0,
+                )
+                scene_cfg = dict(
+                    xaxis_title="Strike ($)",
+                    yaxis_title="Days to Expiry",
+                    zaxis_title=z_label,
+                )
+                if col_name == "IV":
+                    scene_cfg["zaxis"] = dict(range=[0, int(IV_CAP_DISPLAY_PCT)], title=z_label)
                 fig_3d = go.Figure(data=[go.Surface(
                     x=xi, y=yi, z=zi,
                     colorscale=colorscale,
-                    colorbar=dict(title=z_label)
+                    colorbar=dict(title=z_label),
+                    cmin=0 if col_name == "IV" else None,
+                    cmax=IV_CAP_DISPLAY_PCT if col_name == "IV" else None,
                 )])
                 fig_3d.update_layout(
                     title=f"{ticker} {col_name} Surface",
-                    scene=dict(
-                        xaxis_title="Strike ($)",
-                        yaxis_title="Days to Expiry",
-                        zaxis_title=z_label,
-                    ),
+                    scene=scene_cfg,
                     height=550, template="plotly_white"
                 )
                 st.plotly_chart(fig_3d, use_container_width=True)

@@ -2,6 +2,19 @@ import pandas as pd
 import numpy as np
 from scipy.interpolate import interp1d
 
+from config.options import (
+    MAX_SPREAD_PCT,
+    MAX_SPREAD_PCT_RELAXED,
+    MIN_MID_PRICE,
+    MIN_OPEN_INTEREST,
+    MIN_VOLUME,
+    MONEYNESS_MIN,
+    MONEYNESS_MAX,
+    MONEYNESS_SURFACE_MIN,
+    MONEYNESS_SURFACE_MAX,
+)
+
+
 class DataCleaner:
     """
     Nettoyage et préparation des données de marché.
@@ -11,7 +24,7 @@ class DataCleaner:
     """
     
     @staticmethod
-    def clean_option_chain(df, min_bid=0.01, max_spread_pct=0.5):
+    def clean_option_chain(df, min_bid=0.01, max_spread_pct=None):
         """
         Nettoie une chaîne d'options en supprimant les données aberrantes.
         
@@ -23,6 +36,8 @@ class DataCleaner:
         Returns:
             DataFrame: Chaîne nettoyée
         """
+        if max_spread_pct is None:
+            max_spread_pct = MAX_SPREAD_PCT_RELAXED
         df = df.copy()
         
         # Supprimer les lignes avec bid ou ask nuls ou négatifs
@@ -140,7 +155,48 @@ class DataCleaner:
         return np.array(strikes) / spot
     
     @staticmethod
-    def filter_by_moneyness(df, spot, min_moneyness=0.7, max_moneyness=1.3):
+    def filter_surface_quality(
+        df: pd.DataFrame,
+        min_oi: int = None,
+        min_mid: float = None,
+        max_spread_pct: float = None,
+        min_volume: int = None,
+    ) -> pd.DataFrame:
+        """
+        Filtre strict pour la surface IV : exclut options illiquides ou aberrantes.
+        - Volume=0 ET Open Interest < min_oi (sauf si min_volume > 0)
+        - Si min_volume > 0 : exige Volume > min_volume
+        - Spread > mid * max_spread_pct (ex: 25%)
+        - Mid price < min_mid (ex: 0.05$)
+        """
+        if min_oi is None:
+            min_oi = MIN_OPEN_INTEREST
+        if min_mid is None:
+            min_mid = MIN_MID_PRICE
+        if max_spread_pct is None:
+            max_spread_pct = MAX_SPREAD_PCT
+        if min_volume is None:
+            min_volume = 0
+        df = df.copy()
+        if "mid" not in df.columns:
+            df["mid"] = (df["bid"] + df["ask"]) / 2
+        if "spread_pct" not in df.columns:
+            df["spread_pct"] = np.where(
+                df["mid"] > 0,
+                (df["ask"] - df["bid"]) / df["mid"],
+                np.nan
+            )
+        df = df[df["mid"] >= min_mid]
+        df = df[df["spread_pct"].fillna(1).between(0, max_spread_pct)]
+        if "volume" in df.columns and "openInterest" in df.columns:
+            if min_volume > 0:
+                df = df[df["volume"].fillna(0) > min_volume]
+            else:
+                df = df[(df["volume"] > 0) | (df["openInterest"] >= min_oi)]
+        return df.reset_index(drop=True)
+
+    @staticmethod
+    def filter_by_moneyness(df, spot, min_moneyness=None, max_moneyness=None):
         """
         Filtre les options par moneyness pour se concentrer sur les options
         liquides (proche de ATM).
@@ -154,6 +210,10 @@ class DataCleaner:
         Returns:
             DataFrame: Chaîne filtrée
         """
+        if min_moneyness is None:
+            min_moneyness = MONEYNESS_MIN
+        if max_moneyness is None:
+            max_moneyness = MONEYNESS_MAX
         df = df.copy()
         df['moneyness'] = df['strike'] / spot
         df = df[(df['moneyness'] >= min_moneyness) & (df['moneyness'] <= max_moneyness)]

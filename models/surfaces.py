@@ -3,6 +3,11 @@ from scipy.optimize import minimize, curve_fit
 from scipy.interpolate import CubicSpline
 import warnings
 
+# Multi-start pour SVI : évite les minima locaux
+_SVI_N_STARTS = 5
+_SVI_RNG = np.random.default_rng(42)
+
+
 class VolatilitySurface:
     """
     Surface de Volatilité Implicite.
@@ -45,50 +50,70 @@ class VolatilitySurface:
             dict: Paramètres SVI calibrés
         """
         # Conversion en log-moneyness
-        k = np.log(strike_slice / spot)
-        variance = iv_slice ** 2
+        k = np.asarray(strike_slice, dtype=float)
+        k = np.log(k / spot)
+        variance = np.asarray(iv_slice, dtype=float) ** 2
         
         # Fonction SVI
         def svi_func(k_val, a, b, rho, m, sigma):
             """SVI raw parameterization."""
             return a + b * (rho * (k_val - m) + np.sqrt((k_val - m)**2 + sigma**2))
         
-        # Initialisation des paramètres
-        # a ≈ variance ATM, b > 0, -1 < rho < 1, m ≈ 0, sigma > 0
-        initial_guess = [
-            np.mean(variance),  # a
-            0.1,                # b
-            0.0,                # rho
-            0.0,                # m
-            0.1                 # sigma
-        ]
-        
         # Bounds pour garantir l'arbitrage-free
         bounds = (
-            [0, 0, -0.999, -1, 0.001],  # lower bounds
-            [np.inf, np.inf, 0.999, 1, np.inf]  # upper bounds
+            [0, 0, -0.999, -1, 0.001],
+            [np.inf, np.inf, 0.999, 1, np.inf]
         )
         
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                params, _ = curve_fit(
-                    svi_func, k, variance,
-                    p0=initial_guess,
-                    bounds=bounds,
-                    maxfev=10000
-                )
-            
-            a, b, rho, m, sigma = params
-            
-            return {
-                'a': a, 'b': b, 'rho': rho, 'm': m, 'sigma': sigma,
-                'k': k, 'fitted_variance': svi_func(k, *params)
-            }
+        # Multi-start : plusieurs initialisations pour éviter les minima locaux
+        a0 = np.mean(variance)
+        initial_guesses = [
+            [a0, 0.1, 0.0, 0.0, 0.1],
+            [a0, 0.15, -0.3, -0.05, 0.15],
+            [a0, 0.08, 0.2, 0.05, 0.08],
+            [a0 * 1.1, 0.12, -0.1, 0.0, 0.12],
+            [a0 * 0.9, 0.2, 0.1, -0.1, 0.2],
+        ]
+        # Ajouter des perturbations aléatoires
+        for _ in range(_SVI_N_STARTS - 5):
+            p0 = [
+                a0 * (0.8 + 0.4 * _SVI_RNG.random()),
+                0.05 + 0.2 * _SVI_RNG.random(),
+                -0.5 + _SVI_RNG.random(),
+                -0.2 + 0.4 * _SVI_RNG.random(),
+                0.05 + 0.2 * _SVI_RNG.random(),
+            ]
+            initial_guesses.append(p0)
         
-        except Exception as e:
-            print(f"Calibration SVI échouée: {e}")
+        best_params = None
+        best_rmse = np.inf
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for p0 in initial_guesses:
+                try:
+                    params, _ = curve_fit(
+                        svi_func, k, variance,
+                        p0=p0,
+                        bounds=bounds,
+                        maxfev=8000
+                    )
+                    fitted = svi_func(k, *params)
+                    rmse = np.sqrt(np.mean((fitted - variance) ** 2))
+                    if rmse < best_rmse:
+                        best_rmse = rmse
+                        best_params = params
+                except Exception:
+                    continue
+        
+        if best_params is None:
             return None
+        
+        a, b, rho, m, sigma = best_params
+        return {
+            'a': a, 'b': b, 'rho': rho, 'm': m, 'sigma': sigma,
+            'k': k, 'fitted_variance': svi_func(k, *best_params)
+        }
     
     def get_iv_from_svi(self, strike, spot, svi_params):
         """
@@ -254,26 +279,29 @@ class VolatilitySkew:
         }
     
     @staticmethod
-    def explain_skew(strike, spot, iv, atm_iv):
+    def explain_skew(strike, spot, iv, atm_iv, T=1.0, r=0.05, option_type="put"):
         """
         Explique la contribution du skew au prix d'une option.
-        
+
         Args:
             strike (float): Strike de l'option
             spot (float): Prix spot
             iv (float): IV de l'option
             atm_iv (float): IV ATM
-        
+            T (float): Maturité en années (défaut: 1.0)
+            r (float): Taux sans risque (défaut: 0.05)
+            option_type (str): "call" ou "put" (défaut: "put")
+
         Returns:
             dict: Décomposition du prix
         """
         from core.black_scholes import BlackScholes
-        
+
         # Prix avec la IV réelle (incluant le skew)
-        price_with_skew = BlackScholes.get_price(spot, strike, 1.0, 0.05, iv, "put")
-        
+        price_with_skew = BlackScholes.get_price(spot, strike, T, r, iv, option_type)
+
         # Prix si on utilisait l'IV ATM (sans skew)
-        price_flat_vol = BlackScholes.get_price(spot, strike, 1.0, 0.05, atm_iv, "put")
+        price_flat_vol = BlackScholes.get_price(spot, strike, T, r, atm_iv, option_type)
         
         skew_premium = price_with_skew - price_flat_vol
         
