@@ -218,6 +218,15 @@ class DataConnector:
             ticker = yf.Ticker(ticker_symbol)
             expirations = list(ticker.options)  # Tuple de dates "YYYY-MM-DD"
 
+            # Retry si vide (Yahoo bloque parfois les IP datacenter au 1er essai)
+            for attempt in range(2):
+                if expirations:
+                    break
+                logger.warning(f"Retry {attempt + 1}/2 pour {ticker_symbol} (options vides)")
+                time.sleep(1.5)
+                ticker = yf.Ticker(ticker_symbol)
+                expirations = list(ticker.options)
+
             if not expirations:
                 logger.warning(f"Aucune expiration trouvee pour {ticker_symbol}")
                 return []

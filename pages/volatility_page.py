@@ -562,8 +562,18 @@ def render_volatility_strategies():
 
             mc_state = st.session_state.get("str_mc_result")
 
+    except ValueError as e:
+        if "No options data" in str(e):
+            st.error(
+                "**Données d'options indisponibles.** Yahoo Finance bloque souvent les requêtes "
+                "depuis les serveurs cloud (Streamlit Cloud). L'app fonctionne correctement en local : "
+                "lancez `streamlit run app.py` sur votre machine."
+            )
+        else:
+            st.error(f"Error: {str(e)}")
     except Exception as e:
         st.error(f"Error: {str(e)}")
         import traceback
-        st.code(traceback.format_exc())
+        with st.expander("Détails techniques"):
+            st.code(traceback.format_exc())
 

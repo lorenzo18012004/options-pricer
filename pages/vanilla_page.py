@@ -247,8 +247,19 @@ def render_vanilla_option_pricer():
         surface_box = st.expander("3D Surfaces (Strike x Maturity)", expanded=False)
         render_surfaces_section(surface_box, exp_options, ticker, spot, opt_type, rate, div_yield, hist_vol)
 
+    except ValueError as e:
+        if "No options data" in str(e):
+            st.error(
+                "**Données d'options indisponibles.** Yahoo Finance bloque souvent les requêtes "
+                "depuis les serveurs cloud (Streamlit Cloud). L'app fonctionne correctement en local : "
+                "lancez `streamlit run app.py` sur votre machine."
+            )
+        else:
+            st.error(f"Error: {str(e)}")
+        logger.exception("Vanilla pricer error")
     except Exception as e:
         logger.exception("Vanilla pricer error")
         st.error(f"Error: {str(e)}")
         import traceback
-        st.code(traceback.format_exc())
+        with st.expander("Détails techniques"):
+            st.code(traceback.format_exc())
