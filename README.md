@@ -4,6 +4,8 @@ Pricer d'options développé from scratch — projet pédagogique et portfolio p
 
 **Lorenzo Philippe** · M1 Portfolio Management, IAE Paris Est
 
+[![GitHub](https://img.shields.io/badge/GitHub-options--pricer-blue?logo=github)](https://github.com/lorenzo18012004/options-pricer)
+
 ---
 
 ## Fonctionnalités
@@ -108,19 +110,16 @@ python generate_documentation.py
 
 ---
 
-## Déploiement (Streamlit Cloud)
+## Essayer l'app
 
-1. Allez sur **[share.streamlit.io](https://share.streamlit.io/)**
-2. Connectez-vous avec votre compte GitHub
-3. Cliquez sur **"Create app"** → **"Yup, I have an app"**
-4. Remplissez :
-   - **Repository** : `lorenzo18012004/options-pricer`
-   - **Branch** : `main`
-   - **Main file path** : `app.py`
-5. (Optionnel) Sous **"Advanced settings"** : Python 3.12
-6. Cliquez sur **"Deploy"**
+Clonez le repo et lancez en local (Yahoo Finance bloque les requêtes depuis les serveurs cloud) :
 
-L'app sera disponible à une URL du type `https://xxx.streamlit.app` (sous-domaine personnalisable).
+```bash
+git clone https://github.com/lorenzo18012004/options-pricer.git
+cd options-pricer
+pip install -r requirements.txt
+streamlit run app.py
+```
 
 ---
 
