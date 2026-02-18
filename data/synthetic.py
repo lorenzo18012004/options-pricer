@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import logging
 
 from core.black_scholes import BlackScholes
@@ -152,7 +152,7 @@ class SyntheticDataConnector:
 
     @staticmethod
     def _fallback_expirations() -> List[str]:
-        """Generate future expiration dates (Fridays)."""
+        """Generate expiration dates (Fridays) when no Excel."""
         today = datetime.now().date()
         exps = []
         for days in [7, 14, 21, 28, 35, 42, 49, 63, 91, 120, 182, 365]:
@@ -165,25 +165,47 @@ class SyntheticDataConnector:
 
     @staticmethod
     def get_expirations(ticker_symbol: str) -> List[str]:
+        """Return expirations from Excel (all dates, no filter by today)."""
         if _use_excel():
             df = _cache["expirations"]
             ticker_symbol = ticker_symbol.upper().strip()
             rows = df[df["ticker"].str.upper() == ticker_symbol]
             if not rows.empty:
-                today = datetime.now().date()
                 exps = []
                 for x in rows["expiration"].unique():
                     if pd.isna(x):
                         continue
                     try:
                         exp_d = pd.Timestamp(x).date()
-                        if exp_d > today:
-                            exps.append(exp_d.strftime("%Y-%m-%d"))
+                        exps.append(exp_d.strftime("%Y-%m-%d"))
                     except (ValueError, TypeError):
                         continue
                 if exps:
                     return sorted(exps)
         return SyntheticDataConnector._fallback_expirations()
+
+    @staticmethod
+    def get_reference_date(ticker_symbol: str) -> Optional[date]:
+        """Reference date for Excel dataset (min expiration - 7 days). Used for 'days to expiry' display."""
+        if not _use_excel():
+            return None
+        df = _cache["expirations"]
+        ticker_symbol = ticker_symbol.upper().strip()
+        rows = df[df["ticker"].str.upper() == ticker_symbol]
+        if rows.empty:
+            return None
+        dates = []
+        for x in rows["expiration"].unique():
+            if pd.isna(x):
+                continue
+            try:
+                dates.append(pd.Timestamp(x).date())
+            except (ValueError, TypeError):
+                continue
+        if not dates:
+            return None
+        min_exp = min(dates)
+        return min_exp - timedelta(days=7)
 
     @staticmethod
     def get_option_chain(ticker_symbol: str, expiration_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -226,9 +248,10 @@ class SyntheticDataConnector:
         # Fallback: in-memory generation (when Excel has no data for this expiration)
         spot, base_vol, div_yield = _get_profile(ticker_symbol)
         r = 0.04
+        ref_date = SyntheticDataConnector.get_reference_date(ticker_symbol) or datetime.now().date()
         try:
-            exp_dt = datetime.strptime(str(expiration_date)[:10], "%Y-%m-%d")
-            T = max((exp_dt - datetime.now()).days / 365.0, 1e-4)
+            exp_dt = datetime.strptime(str(expiration_date)[:10], "%Y-%m-%d").date()
+            T = max((exp_dt - ref_date).days / 365.0, 1e-4)
         except (ValueError, TypeError):
             T = 0.25
 

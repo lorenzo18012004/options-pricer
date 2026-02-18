@@ -58,10 +58,10 @@ def render_barrier_pricer():
 
     try:
         with st.spinner(f"Loading {ticker}..."):
-            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker, connector=connector)
+            spot, expirations, market_data, div_yield = load_market_snapshot(ticker, connector=connector)
         st.session_state["br_loaded"] = True
 
-        exp_options = build_expiration_options(expirations, max_items=20)
+        exp_options = build_expiration_options(expirations, max_items=20, reference_date=market_data.get("reference_date"))
         if not exp_options:
             st.error("No valid option expirations found.")
             return

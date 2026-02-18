@@ -1,5 +1,5 @@
-from datetime import datetime
-from typing import Dict, List, Tuple, Union, Type
+from datetime import datetime, date
+from typing import Dict, List, Optional, Tuple, Union, Type
 
 import numpy as np
 import streamlit as st
@@ -133,22 +133,29 @@ def load_market_snapshot(
         raise ValueError(f"No options data for {ticker}")
     market_data = connector.get_market_data(ticker)
     div_yield = market_data.get("dividend_yield", 0.0) or 0.0
+    ref_date = getattr(connector, "get_reference_date", lambda t: None)(ticker)
+    if ref_date is not None:
+        market_data["reference_date"] = ref_date
     return float(spot), expirations, market_data, float(div_yield)
 
 
-def build_expiration_options(expirations: List[str], max_items: int = 20) -> List[Dict]:
+def build_expiration_options(
+    expirations: List[str], max_items: int = 20, reference_date: Optional[date] = None
+) -> List[Dict]:
     """
     Build UI-ready expiration options with calendar and business days.
+    When reference_date is set (synthetic Excel), use it instead of today for 'days' calculation.
     """
     exp_options: List[Dict] = []
-    today_np = np.datetime64(datetime.now().date())
+    ref = reference_date or datetime.now().date()
+    ref_np = np.datetime64(ref)
     for exp in expirations[:max_items]:
         try:
-            exp_dt = datetime.strptime(exp, "%Y-%m-%d")
-            days = (exp_dt - datetime.now()).days
+            exp_dt = datetime.strptime(exp, "%Y-%m-%d").date()
+            days = (exp_dt - ref).days
             if days > 0:
-                exp_np = np.datetime64(exp_dt.date())
-                biz_days = int(np.busday_count(today_np, exp_np))
+                exp_np = np.datetime64(exp_dt)
+                biz_days = int(np.busday_count(ref_np, exp_np))
                 biz_days = max(1, biz_days)
                 exp_options.append({
                     "date": exp, "days": days, "biz_days": biz_days,

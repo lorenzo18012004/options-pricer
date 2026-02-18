@@ -73,12 +73,13 @@ def render_vanilla_option_pricer():
     try:
         # --- Fetch all data ---
         with st.spinner(f"Loading {ticker}..."):
-            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker, connector=connector)
+            spot, expirations, market_data, div_yield = load_market_snapshot(ticker, connector=connector)
 
         st.session_state["vp_data"] = True
 
-        # --- Expiration picker (show all, no pre-filtering) ---
-        exp_options = build_expiration_options(expirations, max_items=20)
+        # --- Expiration picker (reference_date from Excel when synthetic) ---
+        ref_date = market_data.get("reference_date")
+        exp_options = build_expiration_options(expirations, max_items=20, reference_date=ref_date)
 
         if not exp_options:
             st.error("No valid expirations")
@@ -91,9 +92,10 @@ def render_vanilla_option_pricer():
         biz_days_to_exp = exp_options[sel_idx].get("biz_days", cal_days_to_exp)
         if biz_days_to_exp is None or biz_days_to_exp < 1:
             try:
-                today_np = np.datetime64(datetime.now().date())
+                ref_d = market_data.get("reference_date") or datetime.now().date()
+                ref_np = np.datetime64(ref_d)
                 exp_np = np.datetime64(datetime.strptime(exp_date, "%Y-%m-%d").date())
-                biz_days_to_exp = max(1, int(np.busday_count(today_np, exp_np)))
+                biz_days_to_exp = max(1, int(np.busday_count(ref_np, exp_np)))
             except (ValueError, TypeError):
                 biz_days_to_exp = max(1, cal_days_to_exp)
 
