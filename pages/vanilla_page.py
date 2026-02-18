@@ -37,8 +37,9 @@ from .vanilla_helpers import (
 
 
 def render_vanilla_option_pricer():
-    """Vanilla Option Pricing - Complete Analysis with Live Data"""
-    st.markdown("### Vanilla Option Pricer - Live Data")
+    """Vanilla Option Pricing - Complete Analysis"""
+    data_src = st.session_state.get("data_source", "Synthetic")
+    st.markdown(f"### Vanilla Option Pricer - {data_src} Data")
 
     # --- Asset & Expiration Selection ---
     from .tickers import POPULAR_TICKERS

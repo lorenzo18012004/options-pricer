@@ -151,18 +151,8 @@ class SyntheticDataConnector:
         return sorted(result, key=lambda x: x[0])
 
     @staticmethod
-    def get_expirations(ticker_symbol: str) -> List[str]:
-        if _use_excel():
-            df = _cache["expirations"]
-            ticker_symbol = ticker_symbol.upper().strip()
-            rows = df[df["ticker"].str.upper() == ticker_symbol]
-            if not rows.empty:
-                exps = [
-                    pd.Timestamp(x).strftime("%Y-%m-%d") if pd.notna(x) else ""
-                    for x in rows["expiration"].unique()
-                ]
-                return sorted([e for e in exps if e])
-        # Fallback
+    def _fallback_expirations() -> List[str]:
+        """Generate future expiration dates (Fridays)."""
         today = datetime.now().date()
         exps = []
         for days in [7, 14, 21, 28, 35, 42, 49, 63, 91, 120, 182, 365]:
@@ -174,45 +164,66 @@ class SyntheticDataConnector:
         return sorted(set(exps))[:18]
 
     @staticmethod
+    def get_expirations(ticker_symbol: str) -> List[str]:
+        if _use_excel():
+            df = _cache["expirations"]
+            ticker_symbol = ticker_symbol.upper().strip()
+            rows = df[df["ticker"].str.upper() == ticker_symbol]
+            if not rows.empty:
+                today = datetime.now().date()
+                exps = []
+                for x in rows["expiration"].unique():
+                    if pd.isna(x):
+                        continue
+                    try:
+                        exp_d = pd.Timestamp(x).date()
+                        if exp_d > today:
+                            exps.append(exp_d.strftime("%Y-%m-%d"))
+                    except (ValueError, TypeError):
+                        continue
+                if exps:
+                    return sorted(exps)
+        return SyntheticDataConnector._fallback_expirations()
+
+    @staticmethod
     def get_option_chain(ticker_symbol: str, expiration_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
         ticker_symbol = ticker_symbol.upper().strip()
+        exp_str = str(expiration_date)[:10]
 
         if _use_excel():
             df = _cache["options"]
-            exp_str = str(expiration_date)[:10]
             df_exp = df["expiration"].apply(
                 lambda x: pd.Timestamp(x).strftime("%Y-%m-%d") if pd.notna(x) else ""
             )
             mask = (df["ticker"].str.upper() == ticker_symbol) & (df_exp == exp_str)
             sub = df[mask]
-            if sub.empty:
-                return pd.DataFrame(), pd.DataFrame()
-            calls = sub[sub["type"] == "call"].copy()
-            puts = sub[sub["type"] == "put"].copy()
-            for c in ["bid", "ask", "iv", "volume", "openInterest", "strike"]:
-                if c in calls.columns:
-                    calls[c] = pd.to_numeric(calls[c], errors="coerce")
-                if c in puts.columns:
-                    puts[c] = pd.to_numeric(puts[c], errors="coerce")
-            if "iv" in calls.columns:
-                calls["impliedVolatility"] = calls["iv"]
-                puts["impliedVolatility"] = puts["iv"]
-            if "openInterest" not in calls.columns and "oi" in calls.columns:
-                calls["openInterest"] = calls["oi"]
-                puts["openInterest"] = puts["oi"]
-            calls["contractSymbol"] = calls.apply(
-                lambda r: f"{ticker_symbol}_{exp_str}_{r['strike']}_C", axis=1
-            )
-            puts["contractSymbol"] = puts.apply(
-                lambda r: f"{ticker_symbol}_{exp_str}_{r['strike']}_P", axis=1
-            )
-            calls["lastTradeDate"] = datetime.now().strftime("%Y-%m-%d")
-            puts["lastTradeDate"] = datetime.now().strftime("%Y-%m-%d")
-            calls["lastPrice"] = (calls["bid"] + calls["ask"]) / 2
-            puts["lastPrice"] = (puts["bid"] + puts["ask"]) / 2
-            return calls.sort_values("strike").reset_index(drop=True), puts.sort_values("strike").reset_index(drop=True)
+            if not sub.empty:
+                calls = sub[sub["type"] == "call"].copy()
+                puts = sub[sub["type"] == "put"].copy()
+                for c in ["bid", "ask", "iv", "volume", "openInterest", "strike"]:
+                    if c in calls.columns:
+                        calls[c] = pd.to_numeric(calls[c], errors="coerce")
+                    if c in puts.columns:
+                        puts[c] = pd.to_numeric(puts[c], errors="coerce")
+                if "iv" in calls.columns:
+                    calls["impliedVolatility"] = calls["iv"]
+                    puts["impliedVolatility"] = puts["iv"]
+                if "openInterest" not in calls.columns and "oi" in calls.columns:
+                    calls["openInterest"] = calls["oi"]
+                    puts["openInterest"] = puts["oi"]
+                calls["contractSymbol"] = calls.apply(
+                    lambda r: f"{ticker_symbol}_{exp_str}_{r['strike']}_C", axis=1
+                )
+                puts["contractSymbol"] = puts.apply(
+                    lambda r: f"{ticker_symbol}_{exp_str}_{r['strike']}_P", axis=1
+                )
+                calls["lastTradeDate"] = datetime.now().strftime("%Y-%m-%d")
+                puts["lastTradeDate"] = datetime.now().strftime("%Y-%m-%d")
+                calls["lastPrice"] = (calls["bid"] + calls["ask"]) / 2
+                puts["lastPrice"] = (puts["bid"] + puts["ask"]) / 2
+                return calls.sort_values("strike").reset_index(drop=True), puts.sort_values("strike").reset_index(drop=True)
 
-        # Fallback : génération en code
+        # Fallback: in-memory generation (when Excel has no data for this expiration)
         spot, base_vol, div_yield = _get_profile(ticker_symbol)
         r = 0.04
         try:
