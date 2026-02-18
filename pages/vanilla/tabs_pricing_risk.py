@@ -153,7 +153,7 @@ def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls,
                         "Dev % Spot": (deviation_eu / spot_parity) * 100,
                     })
                 if not parity_results:
-                    st.info(f"Aucun strike liquide (spread < {MAX_SPREAD_PCT*100:.0f}%) trouvé pour la parité.")
+                    st.info(f"No liquid strike (spread < {MAX_SPREAD_PCT*100:.0f}%) found for parity.")
                 elif parity_results:
                     df_parity = pd.DataFrame(parity_results)
                     col_pc1, col_pc2 = st.columns(2)
@@ -195,8 +195,8 @@ def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls,
                     s2.metric("Avg |EU Dev|", f"${avg_dev_eu:.3f}")
                     s3.metric("Amer bounds breach rate", f"{breach_rate:.1f}%")
                     st.caption(
-                        f"Breach = hors bornes et |écart| > tolérance "
-                        f"(plancher ${BREACH_TOLERANCE_FLOOR:.2f}, plafond ${BREACH_TOLERANCE_CAP:.2f}). "
+                        f"Breach = out of bounds and |gap| > tolerance "
+                        f"(floor ${BREACH_TOLERANCE_FLOOR:.2f}, cap ${BREACH_TOLERANCE_CAP:.2f}). "
                         "Mny = K/S (1=ATM, <1=ITM call, >1=ITM put). "
                         "EU Theory: C−P = S·e^(-qT) − K·e^(-rT). Spot = underlying from ticker."
                     )

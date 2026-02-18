@@ -176,7 +176,7 @@ class DataConnector:
             _set_cached(f"spot_{ticker_symbol}", price)
             return price
         except (AttributeError, TypeError, RuntimeError, IndexError, KeyError) as e:
-            logger.error(f"{_log_prefix()}Erreur prix pour {ticker_symbol}: {e}")
+            logger.error(f"{_log_prefix()}Price error for {ticker_symbol}: {e}")
             raise NetworkError(f"Unable to retrieve price for '{ticker_symbol}': {e}") from e
 
     @staticmethod
@@ -261,7 +261,7 @@ class DataConnector:
             return market_data
 
         except (AttributeError, TypeError, RuntimeError, IndexError, KeyError) as e:
-            logger.error(f"{_log_prefix()}Erreur market data pour {ticker_symbol}: {e}")
+            logger.error(f"{_log_prefix()}Market data error for {ticker_symbol}: {e}")
             raise DataError(f"Unable to retrieve data for '{ticker_symbol}': {e}") from e
 
     @staticmethod
@@ -382,7 +382,7 @@ class DataConnector:
             return expirations
 
         except (AttributeError, KeyError, TypeError, ConnectionError, TimeoutError) as e:
-            logger.error(f"Erreur expirations pour {ticker_symbol}: {e}")
+            logger.error(f"Expirations error for {ticker_symbol}: {e}")
             return []
 
     @staticmethod
@@ -456,7 +456,7 @@ class DataConnector:
             return calls, puts
 
         except (AttributeError, KeyError, TypeError, ValueError) as e:
-            logger.error(f"Erreur option chain pour {ticker_symbol}: {e}")
+            logger.error(f"Option chain error for {ticker_symbol}: {e}")
             return pd.DataFrame(), pd.DataFrame()
 
     # =========================================================================
@@ -496,7 +496,7 @@ class DataConnector:
                     rates.append(rate)
                     _set_cached(f"treasury_{ticker_symbol}", rate)
             except (KeyError, ValueError, IndexError, TypeError) as e:
-                logger.warning(f"Erreur taux {ticker_symbol}: {e}")
+                logger.warning(f"Rate error {ticker_symbol}: {e}")
                 continue
 
         if len(mats) < 2:
@@ -587,7 +587,7 @@ class DataConnector:
             return hist
 
         except (KeyError, ValueError, ConnectionError, TimeoutError) as e:
-            logger.error(f"Erreur historique pour {ticker_symbol}: {e}")
+            logger.error(f"Historical data error for {ticker_symbol}: {e}")
             return pd.DataFrame()
 
     @staticmethod
@@ -654,7 +654,7 @@ class DataConnector:
             return vol
 
         except (KeyError, ValueError, IndexError, TypeError) as e:
-            logger.error(f"Erreur calcul vol pour {ticker_symbol}: {e}")
+            logger.error(f"Volatility calculation error for {ticker_symbol}: {e}")
             return None
 
     # =========================================================================
@@ -674,13 +674,13 @@ class DataConnector:
 
             return {
                 'status': 'OK',
-                'message': f'Yahoo Finance OK ! AAPL = ${price:.2f}',
+                'message': f'Yahoo Finance OK! AAPL = ${price:.2f}',
                 'test_price': price,
             }
 
         except (NetworkError, DataError, ValueError, ConnectionError, TimeoutError) as e:
             return {
                 'status': 'ERROR',
-                'message': f'Erreur Yahoo Finance : {str(e)}',
+                'message': f'Yahoo Finance error: {str(e)}',
                 'error': str(e),
             }

@@ -181,7 +181,7 @@ def render_pnl_tab(tab, df, spot, opt_type, atm_idx):
                           help=f"{n_contracts} x {MULTIPLIER} x ${entry_price:.2f}")
             else:
                 st.metric("Total Credit", f"${entry_price * MULTIPLIER * n_contracts:,.0f}",
-                          help=f"{n_contracts} x {MULTIPLIER} x ${entry_price:.2f} (reçu)")
+                          help=f"{n_contracts} x {MULTIPLIER} x ${entry_price:.2f} (received)")
 
             if opt_type == "call":
                 be = pnl_strike + entry_price
@@ -192,7 +192,7 @@ def render_pnl_tab(tab, df, spot, opt_type, atm_idx):
                 st.metric("Max Loss", f"${entry_price * MULTIPLIER * n_contracts:,.0f}")
             else:
                 if opt_type == "call":
-                    st.metric("Max Loss", "Illimité", help="Short call: perte illimitée si spot monte")
+                    st.metric("Max Loss", "Unlimited", help="Short call: unlimited loss if spot rises")
                 else:
                     max_loss_put = (pnl_strike - entry_price) * MULTIPLIER * n_contracts
                     st.metric("Max Loss", f"${max_loss_put:,.0f}",

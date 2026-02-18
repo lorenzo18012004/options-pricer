@@ -8,7 +8,7 @@ from data import DataConnector, SyntheticDataConnector
 from data.protocols import DataConnectorProtocol
 
 
-# Exceptions qui déclenchent le fallback Yahoo -> Synthétique
+# Exceptions that trigger Yahoo -> Synthetic fallback
 try:
     from data.exceptions import NetworkError, DataError
     _FALLBACK_EXCEPTIONS = (ValueError, ConnectionError, TimeoutError, OSError, NetworkError, DataError)
@@ -41,7 +41,7 @@ class FallbackDataConnector:
             store = self._state if self._state is not None else st.session_state
             if "data_connector_fallback" not in store:
                 store["data_connector_fallback"] = True
-                st.warning("**Yahoo Finance indisponible** — Données synthétiques utilisées en secours.")
+                st.warning("**Yahoo Finance unavailable** — Using synthetic data as fallback.")
             return getattr(self._synthetic, method_name)(*args, **kwargs)
 
     @staticmethod
@@ -99,8 +99,8 @@ def get_data_connector(use_synthetic: bool = False):
     Si use_synthetic=False : FallbackDataConnector (Yahoo avec fallback Synthétique).
     Si use_synthetic=True : SyntheticDataConnector uniquement.
     """
-    if use_synthetic or st.session_state.get("data_source") == "Synthétique":
-        # Réinitialiser l'état fallback quand on utilise Synthétique
+    if use_synthetic or st.session_state.get("data_source") == "Synthetic":
+        # Reset fallback state when using Synthetic
         st.session_state.pop("data_connector_fallback", None)
         st.session_state.pop("_fallback_connector", None)
         return SyntheticDataConnector
@@ -125,7 +125,7 @@ def load_market_snapshot(
     set_request_id()
 
     if connector is None:
-        use_syn = st.session_state.get("data_source") == "Synthétique"
+        use_syn = st.session_state.get("data_source") == "Synthetic"
         connector = get_data_connector(use_syn)
     spot = connector.get_spot_price(ticker)
     expirations = connector.get_expirations(ticker)

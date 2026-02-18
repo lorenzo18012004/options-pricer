@@ -53,7 +53,7 @@ def render_barrier_pricer():
         st.error(str(e))
         return
 
-    use_synthetic = st.session_state.get("data_source") == "Synthétique"
+    use_synthetic = st.session_state.get("data_source") == "Synthetic"
     connector = get_data_connector(use_synthetic)
 
     try:
@@ -396,9 +396,9 @@ def render_barrier_pricer():
     except ValueError as e:
         if "No options data" in str(e):
             st.error(
-                "**Données d'options indisponibles.** Yahoo Finance bloque souvent les requêtes "
-                "depuis les serveurs cloud (Streamlit Cloud). L'app fonctionne correctement en local : "
-                "lancez `streamlit run app.py` sur votre machine."
+                "**Options data unavailable.** Yahoo Finance often blocks requests "
+                "from cloud servers (Streamlit Cloud). The app works correctly locally: "
+                "run `streamlit run app.py` on your machine."
             )
         else:
             st.error(f"Error: {str(e)}")

@@ -16,7 +16,7 @@ def render_market_summary(summary_box, df, spot, atm_idx, days_to_exp, maturity_
         c2.metric("ATM Strike", f"${atm_strike:.0f}")
         c3.metric("Days", f"{days_to_exp}", help=f"{maturity_mode} to expiry")
         c4.metric("Rate", f"{rate*100:.2f}%",
-                  help="Taux sans risque interpolé depuis la courbe Treasury US (Yahoo: ^IRX, ^FVX, ^TNX, ^TYX).")
+                  help="Risk-free rate interpolated from US Treasury curve (Yahoo: ^IRX, ^FVX, ^TNX, ^TYX).")
         c5.metric("ATM IV", f"{atm_iv:.1f}%")
         c6.metric(f"Hist Vol ({hv_window}d)", f"{hist_vol*100:.1f}%",
                   help=f"{hv_window}d window matched to {biz_days_to_exp} business days to expiry")
@@ -28,13 +28,13 @@ def render_market_summary(summary_box, df, spot, atm_idx, days_to_exp, maturity_
         atm_spread_pct = df.loc[atm_mask, "Spread_%"].median() if atm_mask.any() else df["Spread_%"].median()
         atm_spread_dollar = df.loc[atm_mask, "Spread_$"].median() if atm_mask.any() and "Spread_$" in df.columns else (df["Ask"] - df["Bid"]).median() if "Ask" in df.columns and "Bid" in df.columns else 0
         c8.metric("ATM Spread", f"{atm_spread_pct:.1f}% (${atm_spread_dollar:.2f})",
-                  help="Médiane (Ask-Bid)/Mid et Ask-Bid en $ sur 95-105% moneyness.")
+                  help="Median (Ask-Bid)/Mid and Ask-Bid in $ over 95-105% moneyness.")
         vol_val = total_volume_exp if total_volume_exp is not None else df["Volume"].sum()
         oi_val = total_oi_exp if total_oi_exp is not None else df["OpenInt"].sum()
         c9.metric("Total Volume", f"{vol_val:,.0f}",
-                  help="Volume du jour sur toute l'échéance (calls+puts). Yahoo intraday.")
+                  help="Daily volume for the whole expiration (calls+puts). Yahoo intraday.")
         c10.metric("Total OI", f"{oi_val:,.0f}",
-                   help="Open Interest sur toute l'échéance (calls+puts), clôture veille.")
+                   help="Open Interest for the whole expiration (calls+puts), previous close.")
 
 
 def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_type,
@@ -44,11 +44,11 @@ def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_typ
         retention_pct = (filtered_count / raw_count * 100) if raw_count > 0 else 0
         dq1, dq2, dq3, dq4 = dq_box.columns(4)
         dq1.metric("Raw strikes", f"{raw_count}",
-                   help="Tous les strikes retournés par Yahoo pour l'échéance.")
+                   help="All strikes returned by Yahoo for the expiration.")
         dq2.metric("Filtered strikes", f"{filtered_count}",
-                   help="Après clean + moneyness 80-120%.")
+                   help="After clean + moneyness 80-120%.")
         dq3.metric("Retention", f"{retention_pct:.1f}%",
-                   help="filtered / raw. Voir le funnel ci-dessous.")
+                   help="filtered / raw. See funnel below.")
         dq4.metric("Quote timestamp", quote_ts if quote_ts else "N/A")
         chk = df[["Strike", "Mid"]].dropna().sort_values("Strike").reset_index(drop=True)
         mono_breaches = 0
@@ -63,10 +63,10 @@ def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_typ
         dq6.metric("Convexity breaches", f"{conv_breaches}")
         med_spread_dollar = df["Spread_$"].median() if "Spread_$" in df.columns else (df["Ask"] - df["Bid"]).median() if "Ask" in df.columns and "Bid" in df.columns else 0
         dq7.metric("Med spread", f"{df['Spread_%'].median():.2f}% (${med_spread_dollar:.2f})",
-                   help="Médiane sur les strikes (80-120% moneyness).")
+                   help="Median over strikes (80-120% moneyness).")
         dq8, dq9, dq10 = dq_box.columns(3)
         dq8.metric("SVI fit RMSE", f"{svi_fit_rmse_pct:.3f}%" if svi_fit_rmse_pct is not None else "N/A",
-                   help="Si > 5%, fallback automatique sur IV marché (SVI trop bruité).")
+                   help="If > 5%, automatic fallback to market IV (SVI too noisy).")
         dq9.metric("Day count", day_count_basis)
         dq10.metric("Maturity clock", "Calendar")
         penalty = 0.0
@@ -91,18 +91,18 @@ def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_typ
         if count_after_clean is not None and raw_count > 0:
             pct_clean = count_after_clean / raw_count * 100
             pct_mny = filtered_count / count_after_clean * 100 if count_after_clean > 0 else 0
-            dq_box.markdown("**Funnel de rétention :**")
+            dq_box.markdown("**Retention funnel:**")
             dq_box.markdown(
                 f"- **1. clean_option_chain** : {raw_count} → {count_after_clean} ({pct_clean:.1f}%)  "
-                f"*Exclut : bid/ask ≤ 1¢, spread > 50%, volume=0 ET OI=0*"
+                f"*Excludes: bid/ask ≤ 1¢, spread > 50%, volume=0 AND OI=0*"
             )
             dq_box.markdown(
                 f"- **2. filter_by_moneyness(80-120%)** : {count_after_clean} → {filtered_count} ({pct_mny:.1f}%)  "
-                f"*Zone liquide ATM.*"
+                f"*Liquid ATM zone.*"
             )
             dq_box.caption(
-                "Justification : Les options 80-120% moneyness concentrent la liquidité. "
-                "Les deep OTM ont des IV bruitées."
+                "Rationale: 80-120% moneyness options concentrate liquidity. "
+                "Deep OTM have noisy IVs."
             )
         dq_box.caption(
             "Mid = (Bid+Ask)/2. Yahoo Finance: bid/ask ~15min delayed."

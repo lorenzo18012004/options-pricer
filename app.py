@@ -82,10 +82,10 @@ def main():
     with st.sidebar:
         st.markdown("## Data Source")
         data_source = st.radio(
-            "Source des données",
-            ["Yahoo Finance", "Synthétique"],
-            index=0,
-            help="Yahoo Finance : données live (peut être bloqué en cloud). Synthétique : données générées pour démo."
+            "Data source",
+            ["Yahoo Finance", "Synthetic"],
+            index=1,
+            help="Yahoo Finance: live data (may be blocked on cloud). Synthetic: generated data for demo."
         )
         st.session_state["data_source"] = data_source
 

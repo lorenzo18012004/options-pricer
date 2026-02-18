@@ -100,7 +100,7 @@ class SyntheticDataConnector:
             "spot": float(spot),
             "volatility": base_vol,
             "dividend_yield": div_yield,
-            "name": f"{ticker_symbol} (Synthétique)",
+            "name": f"{ticker_symbol} (Synthetic)",
             "market_cap": None,
             "sector": None,
             "currency": "USD",

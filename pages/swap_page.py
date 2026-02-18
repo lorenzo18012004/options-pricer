@@ -56,16 +56,16 @@ def render_swap_pricer():
         return
 
     # Curve build (Yahoo or Synthetic)
-    use_synthetic = st.session_state.get("data_source") == "Synthétique"
+    use_synthetic = st.session_state.get("data_source") == "Synthetic"
     connector = get_data_connector(use_synthetic)
     try:
         curve_nodes, curve_rates = connector.get_treasury_par_curve()
         curve = SwapCurveBuilder.build_from_market_data(
             {}, {}, {float(T): float(r) for T, r in zip(curve_nodes, curve_rates)}
         )
-        curve_source_used = "Synthétique" if use_synthetic else "Yahoo Treasury (live)"
+        curve_source_used = "Synthetic" if use_synthetic else "Yahoo Treasury (live)"
     except (ValueError, KeyError, TypeError, ImportError) as e_curve:
-        st.error(f"Courbe de taux indisponible. Détails: {e_curve}")
+        st.error(f"Yield curve unavailable. Details: {e_curve}")
         return
 
     swap = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, curve, position, day_count)

@@ -69,7 +69,7 @@ def render_volatility_strategies():
     if not st.button("Load Strategy Market Data", type="primary", use_container_width=True) and not st.session_state.get("str_loaded"):
         return
 
-    use_synthetic = st.session_state.get("data_source") == "Synthétique"
+    use_synthetic = st.session_state.get("data_source") == "Synthetic"
     connector = get_data_connector(use_synthetic)
 
     try:
@@ -581,15 +581,15 @@ def render_volatility_strategies():
     except ValueError as e:
         if "No options data" in str(e):
             st.error(
-                "**Données d'options indisponibles.** Yahoo Finance bloque souvent les requêtes "
-                "depuis les serveurs cloud (Streamlit Cloud). L'app fonctionne correctement en local : "
-                "lancez `streamlit run app.py` sur votre machine."
+                "**Options data unavailable.** Yahoo Finance often blocks requests "
+                "from cloud servers (Streamlit Cloud). The app works correctly locally: "
+                "run `streamlit run app.py` on your machine."
             )
         else:
             st.error(f"Error: {str(e)}")
     except (ValueError, KeyError, TypeError, ImportError) as e:
         st.error(f"Error: {str(e)}")
         import traceback
-        with st.expander("Détails techniques"):
+        with st.expander("Technical details"):
             st.code(traceback.format_exc())
 

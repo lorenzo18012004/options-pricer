@@ -66,7 +66,7 @@ def render_vanilla_option_pricer():
         st.error(str(e))
         return
 
-    use_synthetic = st.session_state.get("data_source") == "Synthétique"
+    use_synthetic = st.session_state.get("data_source") == "Synthetic"
     connector = get_data_connector(use_synthetic)
 
     try:
@@ -120,7 +120,7 @@ def render_vanilla_option_pricer():
             f"Implied Yield: {div_yield*100:.2f}% | Spot: ${spot:.2f}"
         )
         if T > 90 / 252.0 and div_yield < 0.001:
-            st.warning("**Check Dividend Data** — T > 90 days et Yield = 0%. Vérifier les dividendes.")
+            st.warning("**Check Dividend Data** — T > 90 days and Yield = 0%. Verify dividend data.")
         if biz_days_to_exp < 14:
             hv_window = 10
         elif biz_days_to_exp < 45:
@@ -302,23 +302,23 @@ def render_vanilla_option_pricer():
     except ValueError as e:
         if "No options data" in str(e):
             st.error(
-                "**Données d'options indisponibles.** Yahoo Finance bloque souvent les requêtes "
-                "depuis les serveurs cloud (Streamlit Cloud). L'app fonctionne correctement en local : "
-                "lancez `streamlit run app.py` sur votre machine."
+                "**Options data unavailable.** Yahoo Finance often blocks requests "
+                "from cloud servers (Streamlit Cloud). The app works correctly locally: "
+                "run `streamlit run app.py` on your machine."
             )
         else:
             st.error(f"Error: {str(e)}")
         logger.exception("Vanilla pricer error")
     except (KeyError, TypeError, ImportError) as e:
         logger.exception("Vanilla pricer error")
-        st.error(f"Erreur de données: {str(e)}")
+        st.error(f"Data error: {str(e)}")
     except Exception as e:
         from data.exceptions import DataError, NetworkError
         if isinstance(e, (DataError, NetworkError)):
-            st.error(f"Erreur données/marché: {str(e)}")
+            st.error(f"Market/data error: {str(e)}")
         else:
             st.error(f"Error: {str(e)}")
             import traceback
-            with st.expander("Détails techniques"):
+            with st.expander("Technical details"):
                 st.code(traceback.format_exc())
         logger.exception("Vanilla pricer error")
