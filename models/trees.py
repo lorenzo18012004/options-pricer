@@ -221,12 +221,7 @@ class BinomialTree:
 
 
 class TrinomialTree:
-    """
-    Modèle d'arbre trinomial pour le pricing d'options.
-    
-    Plus flexible que le binomial (3 branches au lieu de 2).
-    Permet une meilleure convergence pour certains produits exotiques.
-    """
+    """Arbre trinomial (3 branches au lieu de 2)."""
     
     def __init__(self, S, K, T, r, sigma, option_type="call", n_steps=100):
         """

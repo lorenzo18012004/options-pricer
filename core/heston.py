@@ -161,8 +161,7 @@ class HestonModel:
 
     def get_greeks(self, S, K, T, r, option_type="call", q=0.0, bump=0.01):
         """
-        Greeks par differences finies (bump & reprice).
-        Plus robuste que les formules analytiques pour Heston.
+        Greeks par différences finies (bump & reprice).
         """
         price = self.get_price(S, K, T, r, option_type, q)
 
@@ -211,7 +210,7 @@ class HestonModel:
         max_points=25,
     ):
         """
-        Calibration robuste type desk des 5 parametres Heston.
+        Calibration des 5 paramètres Heston.
 
         Pipeline:
         - Filtrage des points (validite IV + moneyness + max_points)
@@ -248,7 +247,7 @@ class HestonModel:
         if len(market_strikes) != len(market_ivs):
             raise ValueError("market_strikes et market_ivs doivent avoir la meme longueur")
 
-        # 1) Filtrage robuste des points
+        # 1) Filtrage des points
         valid_iv = np.isfinite(market_ivs) & (market_ivs > 0.01) & (market_ivs < 3.0)
         mny = market_strikes / S
         valid_mny = (mny >= moneyness_range[0]) & (mny <= moneyness_range[1])
@@ -335,7 +334,7 @@ class HestonModel:
         ]
 
         def objective(params):
-            """Erreur quadratique ponderee + penalites robustes."""
+            """Erreur quadratique pondérée + pénalités Feller."""
             v0, kappa, theta, xi, rho = params
 
             model = HestonModel(v0, kappa, theta, xi, rho)

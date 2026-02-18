@@ -55,11 +55,10 @@ def render_heston_tab(tab, df, spot, exp_date, opt_type, T, rate, div_yield, tic
             cp3.metric("theta (var LT)", f"{cal_info['theta']:.4f}",
                        help=f"Long-term vol = {cal_info['long_term_vol']:.1f}%")
             cp4.metric("xi (vol-of-vol)", f"{cal_info['xi']:.3f}")
-            cp5.metric("rho (corr S-vol)", f"{cal_info['rho']:.3f}", help="Negative = leverage effect")
+            cp5.metric("rho (corr S-vol)", f"{cal_info['rho']:.3f}")
             cm1, cm2, cm3 = st.columns(3)
             cm1.metric("RMSE IV (all)", f"{cal_info['rmse_iv_pct']:.3f}%")
-            cm2.metric("Feller Condition", "OK" if cal_info["feller_satisfied"] else "Violated",
-                       help="2*kappa*theta > xi^2 ensures variance stays positive")
+            cm2.metric("Feller Condition", "OK" if cal_info["feller_satisfied"] else "Violated")
             cm3.metric("Calibration", "Converged" if cal_info["success"] else "Warning")
             qm1, qm2, qm3 = st.columns(3)
             qm1.metric("RMSE IV (filtered)", f"{cal_info.get('rmse_iv_filtered_pct', cal_info['rmse_iv_pct']):.3f}%")
@@ -72,7 +71,7 @@ def render_heston_tab(tab, df, spot, exp_date, opt_type, T, rate, div_yield, tic
                 and cal_info.get("n_points_used", 0) >= 6
             )
             if heston_usable:
-                st.success("Heston quality check: usable for analysis.")
+                st.success("Heston OK.")
             else:
                 st.warning("Heston calibration not robust.")
             st.markdown("---")
@@ -127,7 +126,7 @@ def render_heston_tab(tab, df, spot, exp_date, opt_type, T, rate, div_yield, tic
                     use_container_width=True
                 )
                 if not heston_usable:
-                    st.warning("Heston calibration not robust.")
+                    st.warning("Heston calibration failed.")
 
 
 def render_mc_tab(tab, df, spot, opt_type, atm_idx, rate, T, div_yield, hist_vol, ticker, exp_date):

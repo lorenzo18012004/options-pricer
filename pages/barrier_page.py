@@ -18,7 +18,7 @@ from services import (
 
 
 def render_barrier_pricer():
-    """Barrier Option Pricer - live market, robust diagnostics."""
+    """Barrier Option Pricer."""
     st.markdown("### Barrier Option Pricer - Live Data")
 
     from .tickers import POPULAR_TICKERS

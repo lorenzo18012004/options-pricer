@@ -51,19 +51,6 @@ def _use_excel() -> bool:
     return _cache.get("excel_loaded", False)
 
 
-def get_excel_status() -> Tuple[bool, str]:
-    """
-    Returns (loaded, message) for UI diagnostic.
-    loaded=True if synthetic_data.xlsx was found and loaded.
-    """
-    if not _EXCEL_PATH.exists():
-        return False, f"Excel not found: {_EXCEL_PATH}"
-    ok = _use_excel()
-    if ok:
-        return True, "synthetic_data.xlsx loaded"
-    return False, "Excel exists but failed to load"
-
-
 # Fallback : profils si pas d'Excel
 _SYNTHETIC_PROFILES = {
     "AAPL": (175.0, 0.22, 0.005),

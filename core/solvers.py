@@ -23,8 +23,7 @@ class IVsolver:
     """
     Implied Volatility Solver.
     
-    Methode principale : Newton-Raphson (rapide, quadratique).
-    Fallback : Brent (robuste, garanti de converger si IV existe).
+    Newton-Raphson en priorité, Brent en secours si NR échoue.
     """
 
     @staticmethod
