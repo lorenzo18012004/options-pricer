@@ -39,7 +39,8 @@ from .vanilla_helpers import (
 def render_vanilla_option_pricer():
     """Vanilla Option Pricing - Complete Analysis"""
     data_src = st.session_state.get("data_source", "Synthetic")
-    st.markdown(f"### Vanilla Option Pricer - {data_src} Data")
+    title_suffix = "Live" if data_src == "Yahoo Finance" else "Synthetic"
+    st.markdown(f"### Vanilla Option Pricer - {title_suffix} Data")
 
     # --- Asset & Expiration Selection ---
     from .tickers import POPULAR_TICKERS
@@ -57,6 +58,13 @@ def render_vanilla_option_pricer():
         ticker = popular_tickers[selected]
         with col_sel2:
             st.metric("Symbol", ticker)
+
+    # Clear cached data when data source changes (force fresh load)
+    if "vp_data_source" not in st.session_state:
+        st.session_state["vp_data_source"] = data_src
+    if st.session_state.get("vp_data_source") != data_src:
+        st.session_state.pop("vp_data", None)
+        st.session_state["vp_data_source"] = data_src
 
     if not st.button("Load Market Data", type="primary", use_container_width=True) and "vp_data" not in st.session_state:
         return
