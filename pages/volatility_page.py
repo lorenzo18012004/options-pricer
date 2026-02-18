@@ -143,8 +143,8 @@ def render_volatility_strategies():
             K_put = float(K)
             strategy_label = "Straddle"
         else:
-            call_candidates = calls_tbl[calls_tbl["strike"] >= spot].reset_index(drop=True)
-            put_candidates = puts_tbl[puts_tbl["strike"] <= spot].reset_index(drop=True)
+            call_candidates = calls_tbl[calls_tbl["strike"] > spot].reset_index(drop=True)
+            put_candidates = puts_tbl[puts_tbl["strike"] < spot].reset_index(drop=True)
             if len(call_candidates) == 0 or len(put_candidates) == 0:
                 st.error("Need OTM call and OTM put strikes around spot for strangle.")
                 return
