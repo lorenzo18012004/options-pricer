@@ -1,12 +1,13 @@
-# Versions épinglées pour reproductibilité (compatible release ~=)
-numpy~=1.26.0
-scipy~=1.11.0
-pandas~=2.0.0
-matplotlib~=3.7.0
-yfinance~=0.2.40
+# Versions avec wheels précompilés pour Python 3.11-3.13 (évite compilation gfortran)
+# scipy 1.14+ et pandas 2.2+ ont des wheels pour py313
+numpy>=1.26.0
+scipy>=1.14.0
+pandas>=2.2.0
+matplotlib>=3.7.0
+yfinance>=0.2.40
 streamlit>=1.54.0
-plotly~=5.18.0
-pytest~=7.0.0
-python-docx~=1.0.0
-python-pptx~=0.6.0
-openpyxl~=3.1.0
+plotly>=5.18.0
+pytest>=7.0.0
+python-docx>=1.0.0
+python-pptx>=0.6.0
+openpyxl>=3.1.0
