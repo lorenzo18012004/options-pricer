@@ -10,6 +10,12 @@ Fournit :
 """
 
 import pandas as pd
+
+try:
+    from data.exceptions import NetworkError, DataError
+except ImportError:
+    NetworkError = ConnectionError  # fallback si module absent
+    DataError = ValueError
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -19,12 +25,68 @@ from threading import Lock
 
 import yfinance as yf
 
+from core.request_context import get_request_id
+
 logger = logging.getLogger(__name__)
+
+
+def _log_prefix() -> str:
+    """Préfixe de log avec correlation ID si disponible."""
+    rid = get_request_id()
+    return f"[{rid}] " if rid else ""
+
+# Configurer timeout et retries yfinance au chargement
+try:
+    if hasattr(yf, 'shared') and hasattr(yf.shared, '_EXCHANGE_TIMEOUT'):
+        yf.shared._EXCHANGE_TIMEOUT = 15
+except (AttributeError, TypeError):
+    pass
+try:
+    if hasattr(yf, 'config') and hasattr(yf.config, 'network'):
+        yf.config.network.retries = 3
+except (AttributeError, TypeError):
+    pass
 
 # Cache simple pour eviter de surcharger Yahoo Finance
 _cache: Dict[str, dict] = {}
-_cache_ttl = 30  # secondes
+_cache_ttl = 30  # secondes (configurable via set_cache_ttl)
+
+
+def set_cache_ttl(seconds: int) -> None:
+    """Configure le TTL du cache (en secondes)."""
+    global _cache_ttl
+    _cache_ttl = max(1, int(seconds))
 _cache_lock = Lock()
+
+# Retry et timeout
+_REQUEST_TIMEOUT = 15  # secondes
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 1.0  # secondes
+_RETRY_BACKOFF = 2.0
+
+
+def _retry_with_backoff(func, *args, **kwargs):
+    """Exécute func avec retry exponentiel. Timeout via yfinance config si dispo."""
+    last_exc = None
+    delay = _RETRY_BASE_DELAY
+    retryable = (ConnectionError, TimeoutError, OSError, NetworkError)
+    for attempt in range(_RETRY_MAX_ATTEMPTS):
+        try:
+            if hasattr(yf, 'shared') and hasattr(yf.shared, '_EXCHANGE_TIMEOUT'):
+                yf.shared._EXCHANGE_TIMEOUT = _REQUEST_TIMEOUT
+            return func(*args, **kwargs)
+        except retryable as e:
+            last_exc = e
+            if attempt < _RETRY_MAX_ATTEMPTS - 1:
+                logger.debug(f"{_log_prefix()}Retry {attempt + 1}/{_RETRY_MAX_ATTEMPTS} after {delay:.1f}s: {e}")
+                time.sleep(delay)
+                delay *= _RETRY_BACKOFF
+            else:
+                raise NetworkError(f"Max retries exceeded: {e}") from e
+        except (ValueError, KeyError, DataError) as e:
+            raise
+        except (AttributeError, TypeError, RuntimeError, IndexError) as e:
+            raise
 
 
 def _get_cached(key: str) -> Optional[Any]:
@@ -92,34 +154,30 @@ class DataConnector:
             if cached is not None:
                 return cached
 
-        try:
+        def _fetch():
             ticker = yf.Ticker(ticker_symbol)
-
-            # Essayer fast_info d'abord (plus rapide)
             price = None
             try:
                 price = ticker.fast_info.get('lastPrice')
                 if price is None or price == 0:
                     price = ticker.fast_info.get('last_price')
-            except Exception:
+            except (AttributeError, KeyError, TypeError):
                 pass
-
-            # Fallback : historique recent
             if price is None or price == 0:
                 hist = ticker.history(period="5d")
                 if not hist.empty:
                     price = float(hist['Close'].iloc[-1])
-
             if price is None or price == 0:
                 raise ValueError(f"No price data for '{ticker_symbol}'")
+            return float(price)
 
-            price = float(price)
+        try:
+            price = _retry_with_backoff(_fetch)
             _set_cached(f"spot_{ticker_symbol}", price)
             return price
-
-        except Exception as e:
-            logger.error(f"Erreur prix pour {ticker_symbol}: {e}")
-            raise ValueError(f"Unable to retrieve price for '{ticker_symbol}': {e}")
+        except (AttributeError, TypeError, RuntimeError, IndexError, KeyError) as e:
+            logger.error(f"{_log_prefix()}Erreur prix pour {ticker_symbol}: {e}")
+            raise NetworkError(f"Unable to retrieve price for '{ticker_symbol}': {e}") from e
 
     @staticmethod
     def get_option_chain_with_synced_spot(
@@ -163,7 +221,7 @@ class DataConnector:
                 if len(hist) >= 20:
                     returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
                     vol = float(returns.tail(30).std() * np.sqrt(252))
-            except Exception as e:
+            except (KeyError, ValueError, IndexError, TypeError) as e:
                 logger.warning(f"Calcul vol echoue pour {ticker_symbol}: {e}")
 
             # Dividend yield - yfinance retourne en decimal (0.005 = 0.5%)
@@ -195,17 +253,16 @@ class DataConnector:
 
             _set_cached(f"market_{ticker_symbol}", market_data)
 
-            logger.info(
-                f"{ticker_symbol}: spot=${market_data['spot']:.2f}, "
-                f"vol={market_data['volatility']:.1%}" if market_data['volatility'] else
-                f"{ticker_symbol}: spot=${market_data['spot']:.2f}"
-            )
+            msg = (f"{_log_prefix()}{ticker_symbol}: spot=${market_data['spot']:.2f}, "
+                   f"vol={market_data['volatility']:.1%}" if market_data.get('volatility') else
+                   f"{_log_prefix()}{ticker_symbol}: spot=${market_data['spot']:.2f}")
+            logger.info(msg)
 
             return market_data
 
-        except Exception as e:
-            logger.error(f"Erreur market data pour {ticker_symbol}: {e}")
-            raise ValueError(f"Unable to retrieve data for '{ticker_symbol}': {e}")
+        except (AttributeError, TypeError, RuntimeError, IndexError, KeyError) as e:
+            logger.error(f"{_log_prefix()}Erreur market data pour {ticker_symbol}: {e}")
+            raise DataError(f"Unable to retrieve data for '{ticker_symbol}': {e}") from e
 
     @staticmethod
     def get_dividend_yield_forecast(ticker_symbol: str, spot: float) -> float:
@@ -239,9 +296,48 @@ class DataConnector:
                 annual_est = float(last_4.sum())
                 if annual_est > 0:
                     return annual_est / spot
-        except Exception as e:
+        except (KeyError, ValueError, AttributeError, TypeError) as e:
             logger.debug(f"Dividend forecast failed for {ticker_symbol}: {e}")
         return 0.0
+
+    @staticmethod
+    def get_dividends_schedule(ticker_symbol: str, expiration_date: str) -> List[Tuple[float, float]]:
+        """
+        Calendrier des dividendes discrets (ex_date, amount) avant expiration.
+        Utilisé pour le pricing des options américaines (BinomialTree).
+
+        Source : UNIQUEMENT Yahoo Finance (ticker.dividends).
+        Ne jamais utiliser l'Excel synthétique ici.
+
+        Returns:
+            Liste de (t, amount) avec t = temps en années depuis aujourd'hui
+        """
+        ticker_symbol = ticker_symbol.upper().strip()
+        try:
+            exp_dt = datetime.strptime(str(expiration_date)[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return []
+        today = datetime.now().date()
+        try:
+            ticker = yf.Ticker(ticker_symbol)
+            divs = ticker.dividends
+            if divs is None or len(divs) == 0:
+                return []
+            result = []
+            for d, amount in divs.items():
+                try:
+                    ex_d = d.date() if hasattr(d, 'date') else pd.Timestamp(d).date()
+                except (ValueError, TypeError):
+                    continue
+                if today < ex_d <= exp_dt:
+                    t_years = (ex_d - today).days / 365.0
+                    amt = float(amount) if pd.notna(amount) else 0.0
+                    if amt > 0 and t_years > 0:
+                        result.append((t_years, amt))
+            return sorted(result, key=lambda x: x[0])
+        except (KeyError, ValueError, AttributeError, TypeError) as e:
+            logger.debug(f"Dividends schedule failed for {ticker_symbol}: {e}")
+            return []
 
     # =========================================================================
     # Options
@@ -282,10 +378,10 @@ class DataConnector:
                 return []
 
             _set_cached(f"exp_{ticker_symbol}", expirations)
-            logger.info(f"{ticker_symbol}: {len(expirations)} expirations disponibles")
+            logger.info(f"{_log_prefix()}{ticker_symbol}: {len(expirations)} expirations disponibles")
             return expirations
 
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ConnectionError, TimeoutError) as e:
             logger.error(f"Erreur expirations pour {ticker_symbol}: {e}")
             return []
 
@@ -353,13 +449,13 @@ class DataConnector:
             _set_cached(cache_key, (calls, puts))
 
             logger.info(
-                f"{ticker_symbol} {expiration_date}: "
+                f"{_log_prefix()}{ticker_symbol} {expiration_date}: "
                 f"{len(calls)} calls, {len(puts)} puts"
             )
 
             return calls, puts
 
-        except Exception as e:
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
             logger.error(f"Erreur option chain pour {ticker_symbol}: {e}")
             return pd.DataFrame(), pd.DataFrame()
 
@@ -399,7 +495,7 @@ class DataConnector:
                     mats.append(float(mat))
                     rates.append(rate)
                     _set_cached(f"treasury_{ticker_symbol}", rate)
-            except Exception as e:
+            except (KeyError, ValueError, IndexError, TypeError) as e:
                 logger.warning(f"Erreur taux {ticker_symbol}: {e}")
                 continue
 
@@ -414,6 +510,17 @@ class DataConnector:
         order = np.argsort(mats)
         mats = mats[order]
         rates = rates[order]
+
+        # Interpoler 2Y, 3Y, 7Y pour meilleure précision swaps
+        extra_mats = [2.0, 3.0, 7.0]
+        to_add = [(em, float(np.interp(em, mats, rates))) for em in extra_mats
+                  if em not in mats and mats.min() < em < mats.max()]
+        if to_add:
+            all_mats = np.concatenate([mats, np.array([x[0] for x in to_add])])
+            all_rates = np.concatenate([rates, np.array([x[1] for x in to_add])])
+            order = np.argsort(all_mats)
+            mats = all_mats[order]
+            rates = all_rates[order]
 
         _set_cached("treasury_par_curve", (mats, rates))
         return mats, rates
@@ -448,7 +555,7 @@ class DataConnector:
         rate = float(curve.get_zero_rate(time_to_maturity_years))
 
         _set_cached(f"rate_curve_{time_to_maturity_years:.4f}", rate)
-        logger.info(f"Taux interpole ({time_to_maturity_years:.2f}Y): {rate:.4f}")
+        logger.info(f"{_log_prefix()}Taux interpole ({time_to_maturity_years:.2f}Y): {rate:.4f}")
         return rate
 
     # =========================================================================
@@ -479,7 +586,7 @@ class DataConnector:
 
             return hist
 
-        except Exception as e:
+        except (KeyError, ValueError, ConnectionError, TimeoutError) as e:
             logger.error(f"Erreur historique pour {ticker_symbol}: {e}")
             return pd.DataFrame()
 
@@ -540,13 +647,13 @@ class DataConnector:
             vol = float(returns.tail(window).std() * np.sqrt(252))
 
             logger.info(
-                f"HV {ticker_symbol}: window={window}d "
+                f"{_log_prefix()}HV {ticker_symbol}: window={window}d "
                 f"(maturity={maturity_days}d) -> {vol:.1%}"
             )
 
             return vol
 
-        except Exception as e:
+        except (KeyError, ValueError, IndexError, TypeError) as e:
             logger.error(f"Erreur calcul vol pour {ticker_symbol}: {e}")
             return None
 
@@ -571,7 +678,7 @@ class DataConnector:
                 'test_price': price,
             }
 
-        except Exception as e:
+        except (NetworkError, DataError, ValueError, ConnectionError, TimeoutError) as e:
             return {
                 'status': 'ERROR',
                 'message': f'Erreur Yahoo Finance : {str(e)}',

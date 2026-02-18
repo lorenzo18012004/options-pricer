@@ -80,6 +80,15 @@ def main():
     st.markdown('<p class="main-header">Options Pricer</p>', unsafe_allow_html=True)
 
     with st.sidebar:
+        st.markdown("## Data Source")
+        data_source = st.radio(
+            "Source des données",
+            ["Yahoo Finance", "Synthétique"],
+            index=0,
+            help="Yahoo Finance : données live (peut être bloqué en cloud). Synthétique : données générées pour démo."
+        )
+        st.session_state["data_source"] = data_source
+
         st.markdown("## Product Selection")
         product = st.selectbox(
             "Choose Product Type",

@@ -26,14 +26,14 @@ BREACH_RATE_GOOD = 5.0    # < 5% = OK
 BREACH_RATE_WARNING = 20.0  # < 20% = warning, >= 20% = error
 
 # --- Moneyness (K/S) ---
-MONEYNESS_MIN = 0.80  # Filtre chain principale
-MONEYNESS_MAX = 1.20
-MONEYNESS_SURFACE_MIN = 0.85  # Filtre surface 3D (plus strict)
-MONEYNESS_SURFACE_MAX = 1.15
+MONEYNESS_MIN = 0.75  # Filtre chain principale (élargi pour ≥80% rétention)
+MONEYNESS_MAX = 1.25
+MONEYNESS_SURFACE_MIN = 0.70  # Filtre surface 3D (élargi pour ailes)
+MONEYNESS_SURFACE_MAX = 1.30
 
 # --- Surface 3D ---
-SURFACE_SMOOTH_RBF = 0.05
-SURFACE_GAUSSIAN_SIGMA = 1.2
+SURFACE_SMOOTH_RBF = 0.001  # Très peu de lissage RBF pour préserver smile/term structure
+SURFACE_GAUSSIAN_SIGMA = 0.2  # Léger smoothing gaussien (0 = désactivé)
 
 OPTIONS_CONFIG = {
     "max_spread_pct": MAX_SPREAD_PCT,

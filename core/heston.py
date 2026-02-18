@@ -125,7 +125,7 @@ class HestonModel:
         # Integration numerique
         try:
             integral, _ = quad(integrand, 0, 100, limit=200)
-        except Exception:
+        except (ValueError, RuntimeError):
             integral, _ = quad(integrand, 0, 50, limit=100)
 
         # Prix du call via Lewis (2000)
@@ -346,7 +346,7 @@ class HestonModel:
                     model_price = model.get_price(S, K, T, r, option_type, q)
                     rel_err = (model_price - mkt_price) / max(1e-6, mkt_price)
                     total_error += w * (rel_err ** 2)
-                except Exception:
+                except (ValueError, RuntimeError):
                     total_error += 50.0
 
             # Penalite si Feller violee
@@ -371,7 +371,7 @@ class HestonModel:
                 seed=42, polish=False
             )
             x0 = result_global.x
-        except Exception:
+        except (ValueError, RuntimeError):
             pass  # Garder le x0 initial si DE echoue
 
         result = minimize(

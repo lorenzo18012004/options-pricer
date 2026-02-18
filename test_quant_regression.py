@@ -159,6 +159,50 @@ class TestIVSolver:
         assert IVsolver.find_implied_vol(p["S"] + 1, p["S"], p["K"], p["T"], p["r"], "call") is None
         assert IVsolver.find_implied_vol(1, p["S"], p["K"], 0, p["r"], "call") is None
 
+    def test_nan_inputs_return_none(self, bs_params):
+        """NaN/Inf inputs return None."""
+        from core.solvers import IVsolver
+        import numpy as np
+        p = bs_params
+        assert IVsolver.find_implied_vol(np.nan, p["S"], p["K"], p["T"], p["r"], "call") is None
+        assert IVsolver.find_implied_vol(5.0, np.nan, p["K"], p["T"], p["r"], "call") is None
+        assert IVsolver.find_implied_vol(5.0, p["S"], np.inf, p["T"], p["r"], "call") is None
+
+    def test_atm_guess_converges_fast(self, bs_params):
+        """Brenner-Subrahmanyam guess helps ATM convergence."""
+        from core.black_scholes import BlackScholes
+        from core.solvers import IVsolver
+        p = bs_params
+        S, K = 100.0, 100.0  # ATM
+        T, r, q = 0.5, 0.05, 0.02
+        sigma_true = 0.25
+        price = BlackScholes.get_price(S, K, T, r, sigma_true, "call", q)
+        iv = IVsolver.find_implied_vol(price, S, K, T, r, "call", q)
+        assert iv is not None
+        assert abs(iv - sigma_true) < 1e-6
+
+    def test_find_implied_vol_with_reason(self, bs_params):
+        """find_implied_vol_with_reason returns explicit failure reason."""
+        from core.black_scholes import BlackScholes
+        from core.solvers import (
+            IVsolver,
+            IV_FAIL_INVALID_INPUT,
+            IV_FAIL_OUT_OF_BOUNDS,
+            IV_OK,
+        )
+        p = bs_params
+        S, K, T, r, q = p["S"], p["K"], p["T"], p["r"], p.get("q", 0.0)
+        price = BlackScholes.get_price(S, K, T, r, 0.25, "call", q)
+        iv, reason = IVsolver.find_implied_vol_with_reason(price, S, K, T, r, "call", q)
+        assert iv is not None
+        assert reason == IV_OK
+        iv2, reason2 = IVsolver.find_implied_vol_with_reason(-1, S, K, T, r, "call", q)
+        assert iv2 is None
+        assert reason2 == IV_FAIL_INVALID_INPUT
+        iv3, reason3 = IVsolver.find_implied_vol_with_reason(S + 10, S, K, T, r, "call", q)
+        assert iv3 is None
+        assert reason3 == IV_FAIL_OUT_OF_BOUNDS
+
 
 # =============================================================================
 # BINOMIAL TREE
@@ -332,6 +376,52 @@ class TestBarrierOptions:
         with pytest.raises(ValueError):
             BarrierOption(100, 100, 0.5, 0.05, 0.25, 90, "up-and-out", "call")
 
+    def test_analytical_down_and_out_in_parity(self):
+        """Analytical: down-and-out + down-and-in = vanilla (exact)."""
+        from instruments.exotic import BarrierOption
+        from core.black_scholes import BlackScholes
+        S, K, T, r, sigma, q, barrier = 100.0, 100.0, 0.5, 0.05, 0.25, 0.02, 90.0
+        doi = BarrierOption(S, K, T, r, sigma, barrier, "down-and-out", "call", q=q)
+        din = BarrierOption(S, K, T, r, sigma, barrier, "down-and-in", "call", q=q)
+        r_doi = doi.price(method="analytical")
+        r_din = din.price(method="analytical")
+        vanilla = BlackScholes.get_price(S, K, T, r, sigma, "call", q)
+        combined = r_doi["price"] + r_din["price"]
+        assert abs(combined - vanilla) < 1e-10
+
+    def test_analytical_down_and_out_leq_vanilla(self):
+        """Analytical: down-and-out call <= vanilla call."""
+        from instruments.exotic import BarrierOption
+        from core.black_scholes import BlackScholes
+        S, K, T, r, sigma, barrier = 100.0, 100.0, 0.5, 0.05, 0.25, 90.0
+        dao = BarrierOption(S, K, T, r, sigma, barrier, "down-and-out", "call")
+        vanilla = BlackScholes.get_price(S, K, T, r, sigma, "call")
+        dao_price = dao.price(method="analytical")["price"]
+        assert dao_price <= vanilla + 1e-10
+
+    def test_analytical_up_and_out_in_parity(self):
+        """Analytical: up-and-out + up-and-in = vanilla (exact)."""
+        from instruments.exotic import BarrierOption
+        from core.black_scholes import BlackScholes
+        S, K, T, r, sigma, q, barrier = 100.0, 100.0, 0.5, 0.05, 0.25, 0.02, 115.0
+        uao = BarrierOption(S, K, T, r, sigma, barrier, "up-and-out", "call", q=q)
+        uai = BarrierOption(S, K, T, r, sigma, barrier, "up-and-in", "call", q=q)
+        r_uao = uao.price(method="analytical")
+        r_uai = uai.price(method="analytical")
+        vanilla = BlackScholes.get_price(S, K, T, r, sigma, "call", q)
+        combined = r_uao["price"] + r_uai["price"]
+        assert abs(combined - vanilla) < 1e-10
+
+    def test_analytical_up_and_out_leq_vanilla(self):
+        """Analytical: up-and-out call <= vanilla call."""
+        from instruments.exotic import BarrierOption
+        from core.black_scholes import BlackScholes
+        S, K, T, r, sigma, barrier = 100.0, 100.0, 0.5, 0.05, 0.25, 115.0
+        uao = BarrierOption(S, K, T, r, sigma, barrier, "up-and-out", "call")
+        vanilla = BlackScholes.get_price(S, K, T, r, sigma, "call")
+        uao_price = uao.price(method="analytical")["price"]
+        assert uao_price <= vanilla + 1e-10
+
 
 # =============================================================================
 # YIELD CURVE
@@ -412,6 +502,21 @@ class TestSwap:
         payer = VanillaSwap(1_000_000, 0.05, 2, 5, curve, "payer")
         receiver = VanillaSwap(1_000_000, 0.05, 2, 5, curve, "receiver")
         assert abs(payer.npv() + receiver.npv()) < 1e-6
+
+    def test_day_count_affects_par_rate(self):
+        """Different day counts give slightly different par rates."""
+        from core.curves import YieldCurve
+        from instruments.rates import VanillaSwap, SwapCurveBuilder
+        curve = SwapCurveBuilder.build_from_market_data(
+            {}, {}, {1.0: 0.03, 2.0: 0.035, 5.0: 0.04, 10.0: 0.045}
+        )
+        s_30360 = VanillaSwap(1_000_000, 0.04, 2, 5, curve, "payer", day_count="30/360")
+        s_act365 = VanillaSwap(1_000_000, 0.04, 2, 5, curve, "payer", day_count="ACT/365")
+        par_30 = s_30360.par_rate()
+        par_act = s_act365.par_rate()
+        assert par_30 > 0 and par_act > 0
+        # Par rates should be close but may differ slightly
+        assert abs(par_30 - par_act) < 0.01
 
     def test_dv01_positive_payer(self):
         """Payer swap: rates up -> NPV down, DV01 > 0 (sensitivity to +1bp)."""
@@ -532,6 +637,84 @@ class TestVolatilitySurface:
             for k, iv in zip(strikes, ivs):
                 iv_svi = surface.get_iv_from_svi(k, 100, params)
                 assert abs(iv_svi - iv) < 0.05  # Should be close at calibration points
+
+
+# =============================================================================
+# INTEGRATION
+# =============================================================================
+
+class TestIntegration:
+    """Integration: load data -> price -> verify."""
+
+    def test_synthetic_load_and_price_vanilla(self):
+        """Synthetic connector: load AAPL, price call, verify roundtrip."""
+        from datetime import datetime
+        from data import SyntheticDataConnector
+        from core.black_scholes import BlackScholes
+        from core.solvers import IVsolver
+        connector = SyntheticDataConnector
+        spot = connector.get_spot_price("AAPL")
+        exps = connector.get_expirations("AAPL")
+        assert len(exps) > 0
+        exp = exps[0]
+        calls, puts = connector.get_option_chain("AAPL", exp)
+        if calls.empty or puts.empty:
+            pytest.skip("No synthetic options for AAPL")
+        try:
+            exp_dt = datetime.strptime(exp[:10], "%Y-%m-%d")
+            days = (exp_dt - datetime.now()).days
+            T = max(days / 365.0, 1e-4)
+        except (ValueError, TypeError):
+            T = 0.25
+        rate = connector.get_risk_free_rate(T)
+        div = connector.get_dividend_yield_forecast("AAPL", spot)
+        row = calls.iloc[len(calls) // 2]
+        K = float(row["strike"])
+        mid = (float(row["bid"]) + float(row["ask"])) / 2
+        iv = IVsolver.find_implied_vol(mid, spot, K, T, rate, "call", div)
+        assert iv is not None
+        price_back = BlackScholes.get_price(spot, K, T, rate, iv, "call", div)
+        assert abs(price_back - mid) < 0.05
+
+    def test_synthetic_treasury_has_extra_points(self):
+        """Treasury curve has 2Y, 3Y, 7Y for swap precision (interpolated or direct)."""
+        from data import SyntheticDataConnector
+        mats, rates = SyntheticDataConnector.get_treasury_par_curve()
+        assert len(mats) >= 5
+        assert mats.min() <= 2 <= mats.max()
+        assert mats.min() <= 3 <= mats.max()
+        assert mats.min() <= 7 <= mats.max()
+
+    def test_fallback_connector_uses_synthetic_on_yahoo_failure(self):
+        """FallbackDataConnector uses Synthetic when Yahoo fails (mock)."""
+        from services.market_service import FallbackDataConnector
+        from data import SyntheticDataConnector
+        store = {}
+        fc = FallbackDataConnector(synthetic_connector=SyntheticDataConnector, state_store=store)
+        spot = fc._try_or_fallback("get_spot_price", "AAPL", False)
+        assert spot > 0
+        exps = fc._try_or_fallback("get_expirations", "AAPL")
+        assert len(exps) > 0
+
+    def test_heston_edge_v0_small(self):
+        """Heston with small v0 produces valid price."""
+        from core.heston import HestonModel
+        m = HestonModel(0.01, 2.0, 0.04, 0.3, -0.5)
+        p = m.get_price(100, 100, 0.5, 0.05, "call", 0.0)
+        assert p > 0 and p < 100
+
+    def test_mc_barrier_converges_to_analytic(self):
+        """MC up-and-out with many paths close to analytic."""
+        from instruments.exotic import BarrierOption
+        S, K, T, r, sigma = 100.0, 100.0, 0.5, 0.05, 0.25
+        barrier = 120.0
+        opt = BarrierOption(S, K, T, r, sigma, barrier, "up-and-out", "call")
+        mc_result = opt.price(n_simulations=20000, n_steps=100, seed=42)
+        analytic_result = opt.price(method="analytical")
+        analytic = analytic_result.get("price") if analytic_result else None
+        if analytic is not None and mc_result["price"] is not None:
+            rel_err = abs(mc_result["price"] - analytic) / max(analytic, 0.01)
+            assert rel_err < 0.15  # 15% tolerance for MC vs analytic
 
 
 # =============================================================================

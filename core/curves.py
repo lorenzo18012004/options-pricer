@@ -1,4 +1,5 @@
 import numpy as np
+from datetime import datetime, timedelta
 from scipy.interpolate import CubicSpline
 
 class YieldCurve:
@@ -213,14 +214,47 @@ class YieldCurve:
         )
 
 
+# Conventions de day count pour les swaps
+DAY_COUNT_30_360 = "30/360"
+DAY_COUNT_ACT_365 = "ACT/365"
+DAY_COUNT_ACT_360 = "ACT/360"
+
+
+def _accrual_fraction(t_prev: float, t_i: float, day_count: str,
+                      ref_date: datetime = None) -> float:
+    """
+    Fraction d'accrual pour une période [t_prev, t_i] en années.
+    t_prev, t_i : fractions d'année (ex: 0.5, 1.0 pour semi-annuel)
+    ref_date : date de référence pour ACT/365 et ACT/360 (vrais jours calendaires)
+    """
+    if day_count == DAY_COUNT_30_360:
+        months = (t_i - t_prev) * 12.0
+        return months * 30.0 / 360.0  # 30/360 US
+    if day_count in (DAY_COUNT_ACT_365, DAY_COUNT_ACT_360) and ref_date is not None:
+        date_prev = ref_date + timedelta(days=round(t_prev * 365.25))
+        date_i = ref_date + timedelta(days=round(t_i * 365.25))
+        actual_days = (date_i - date_prev).days
+        if day_count == DAY_COUNT_ACT_365:
+            return actual_days / 365.0
+        return actual_days / 360.0
+    days_approx = (t_i - t_prev) * 365.0
+    if day_count == DAY_COUNT_ACT_365:
+        return days_approx / 365.0
+    if day_count == DAY_COUNT_ACT_360:
+        return days_approx / 360.0
+    return t_i - t_prev  # fallback: year fraction
+
+
 class InterestRateSwap:
     """
     Interest Rate Swap (IRS) : Échange de flux fixe contre flux flottant.
     
     Produit vanille du marché des taux. Utilisé pour gérer le risque de taux.
+    Supporte les conventions de day count : 30/360, ACT/365, ACT/360.
     """
     
-    def __init__(self, notional, fixed_rate, payment_freq, maturity, curve):
+    def __init__(self, notional, fixed_rate, payment_freq, maturity, curve,
+                 day_count: str = DAY_COUNT_30_360):
         """
         Args:
             notional (float): Montant notionnel du swap
@@ -228,12 +262,15 @@ class InterestRateSwap:
             payment_freq (float): Fréquence de paiement (1 = annuel, 2 = semestriel, 4 = trimestriel)
             maturity (float): Maturité en années
             curve (YieldCurve): Courbe de taux pour l'actualisation
+            day_count (str): Convention de day count ("30/360", "ACT/365", "ACT/360")
         """
         self.notional = notional
         self.fixed_rate = fixed_rate
         self.payment_freq = payment_freq
         self.maturity = maturity
         self.curve = curve
+        self.day_count = day_count or DAY_COUNT_30_360
+        self.ref_date = datetime.now().date()
         
         # Génération de la schedule de paiements
         self.payment_dates = np.arange(1/payment_freq, maturity + 1/payment_freq, 1/payment_freq)
@@ -241,15 +278,20 @@ class InterestRateSwap:
     def get_fixed_leg_pv(self):
         """
         Valeur Présente de la jambe fixe.
+        Utilise la convention day_count pour les fractions d'accrual.
         
         Returns:
             float: PV des flux fixes
         """
         pv = 0.0
+        t_prev = 0.0
+        ref_dt = datetime.combine(self.ref_date, datetime.min.time())
         for t in self.payment_dates:
-            payment = self.notional * self.fixed_rate / self.payment_freq
+            alpha = _accrual_fraction(t_prev, float(t), self.day_count, ref_dt)
+            payment = self.notional * self.fixed_rate * alpha
             df = self.curve.get_discount_factor(t)
             pv += payment * df
+            t_prev = float(t)
         return pv
     
     def get_floating_leg_pv(self):
@@ -296,7 +338,7 @@ class InterestRateSwap:
         # Swap avec courbe shiftée
         shifted_swap = InterestRateSwap(
             self.notional, self.fixed_rate, self.payment_freq, 
-            self.maturity, shifted_curve
+            self.maturity, shifted_curve, day_count=self.day_count
         )
         
         # DV01 = (NPV_shifted - NPV_original)
@@ -309,13 +351,20 @@ class InterestRateSwap:
         Taux swap par (le taux fixe qui rend le NPV = 0 à l'initiation).
         
         C'est le taux swap coté sur le marché.
+        Utilise day_count pour les accruals.
         
         Returns:
             float: Taux swap par
         """
-        # Par swap rate = (1 - DF(T)) / sum(DF(t_i))
         df_final = self.curve.get_discount_factor(self.maturity)
-        sum_df = sum(self.curve.get_discount_factor(t) for t in self.payment_dates)
-        
-        par_rate = (1 - df_final) / sum_df * self.payment_freq
+        sum_weighted = 0.0
+        t_prev = 0.0
+        ref_dt = datetime.combine(self.ref_date, datetime.min.time())
+        for t in self.payment_dates:
+            alpha = _accrual_fraction(t_prev, float(t), self.day_count, ref_dt)
+            sum_weighted += alpha * self.curve.get_discount_factor(t)
+            t_prev = float(t)
+        if sum_weighted <= 0:
+            return 0.0
+        par_rate = (1 - df_final) / sum_weighted
         return par_rate

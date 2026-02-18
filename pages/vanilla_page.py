@@ -8,11 +8,14 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 from core import BlackScholes, IVsolver
+from core.validation import validate_ticker
+from data.exceptions import ValidationError
 from models import VolatilitySurface
-from data import DataConnector, DataCleaner
+from data import DataCleaner
 from config.options import MAX_SPREAD_PCT, MONEYNESS_MIN, MONEYNESS_MAX
 from services import (
     build_expiration_options,
+    get_data_connector,
     load_market_snapshot,
     require_hist_vol_market_only,
 )
@@ -58,9 +61,18 @@ def render_vanilla_option_pricer():
         return
 
     try:
+        ticker = validate_ticker(ticker)
+    except ValidationError as e:
+        st.error(str(e))
+        return
+
+    use_synthetic = st.session_state.get("data_source") == "Synthétique"
+    connector = get_data_connector(use_synthetic)
+
+    try:
         # --- Fetch all data ---
         with st.spinner(f"Loading {ticker}..."):
-            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker)
+            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker, connector=connector)
 
         st.session_state["vp_data"] = True
 
@@ -92,12 +104,12 @@ def render_vanilla_option_pricer():
 
         # Fetch rate, vol, chain (spot refetch apres chain pour sync avec quotes)
         with st.spinner("Loading options data..."):
-            rate_init = DataConnector.get_risk_free_rate(T)
+            rate_init = connector.get_risk_free_rate(T)
             if T > 1.0:
                 rate_init = max(rate_init, 0.035)
-            hist_vol = require_hist_vol_market_only(ticker, max(1, biz_days_to_exp))
-            calls, puts, spot_market = DataConnector.get_option_chain_with_synced_spot(ticker, exp_date)
-            div_yield_forecast = DataConnector.get_dividend_yield_forecast(ticker, spot_market)
+            hist_vol = require_hist_vol_market_only(ticker, max(1, biz_days_to_exp), connector=connector)
+            calls, puts, spot_market = connector.get_option_chain_with_synced_spot(ticker, exp_date)
+            div_yield_forecast = connector.get_dividend_yield_forecast(ticker, spot_market)
             spot, rate, div_yield = calibrate_market_from_put_call_parity(
                 calls, puts, spot_market, T, rate_init, div_yield,
                 div_yield_forecast=div_yield_forecast,
@@ -192,7 +204,7 @@ def render_vanilla_option_pricer():
             )
             iv_used = svi_iv if svi_usable else market_iv
 
-            model_price = BlackScholes.get_price(spot, K, T, rate, hist_vol, opt_type, div_yield)
+            theoretical_hv = BlackScholes.get_price(spot, K, T, rate, hist_vol, opt_type, div_yield)
             greeks = BlackScholes.get_all_greeks(spot, K, T, rate, iv_used, opt_type, div_yield)
 
             exec_cost = (ask - bid) / 2
@@ -205,8 +217,8 @@ def render_vanilla_option_pricer():
                 "Spread_$": spread_dollar,
                 "IV_%": market_iv * 100, "SVI_IV_%": (svi_iv * 100) if svi_iv is not None else np.nan,
                 "IV_Used_%": iv_used * 100, "HV_%": hist_vol * 100,
-                "BS_Price": greeks["price"], "Model_HV": model_price,
-                "Mispricing": model_price - mid,
+                "BS_Price": greeks["price"], "Theoretical_HV": theoretical_hv,
+                "Mispricing": greeks["price"] - mid,
                 "Cost_Ask": ask * 100,
                 "Exec_Cost": exec_cost * 100,
                 "Delta": greeks["delta"], "Gamma": greeks["gamma"],
@@ -221,6 +233,29 @@ def render_vanilla_option_pricer():
             st.warning("Could not compute IVs")
             return
         df = pd.DataFrame(results)
+
+        # Correction convexité (butterfly) : si violations, remplacer IV par SVI pour ces strikes
+        if opt_type == "call" and svi_params is not None and svi_usable:
+            strikes_arr = df["Strike"].values
+            iv_arr = df["IV_Used_%"].values / 100.0
+            prices = np.array([
+                BlackScholes.get_price(spot, K, T, rate, iv, "call", div_yield)
+                for K, iv in zip(strikes_arr, iv_arr)
+            ])
+            sec_diff = np.diff(prices, 2)
+            viol_idx = np.where(sec_diff < -1e-6)[0] + 1
+            for idx in viol_idx:
+                try:
+                    svi_iv_fix = float(svi_model.get_iv_from_svi(strikes_arr[idx], spot, svi_params))
+                    svi_iv_fix = float(np.clip(svi_iv_fix, 0.01, 3.0))
+                    df.loc[df.index[idx], "IV_Used_%"] = svi_iv_fix * 100
+                    g = BlackScholes.get_all_greeks(spot, strikes_arr[idx], T, rate, svi_iv_fix, opt_type, div_yield)
+                    df.loc[df.index[idx], "BS_Price"] = g["price"]
+                    df.loc[df.index[idx], "Mispricing"] = g["price"] - df.loc[df.index[idx], "Mid"]
+                    for gk in ["Delta", "Gamma", "Vega", "Theta", "Rho", "Vanna", "Volga", "Charm"]:
+                        df.loc[df.index[idx], gk] = g[gk.lower()]
+                except (ValueError, TypeError, KeyError):
+                    pass
 
         summary_box = st.expander("Market Summary", expanded=True)
         atm_idx = (df["Moneyness"] - 1.0).abs().idxmin()
@@ -257,12 +292,12 @@ def render_vanilla_option_pricer():
 
         render_mc_tab(tab_mc, df, spot, opt_type, atm_idx, rate, T, div_yield, hist_vol, ticker, exp_date)
 
-        render_pricing_tab(tab_pricing, df, spot, T, rate, div_yield, opt_type)
+        render_pricing_tab(tab_pricing, df, spot, T, rate, div_yield, opt_type, ticker=ticker, exp_date=exp_date, connector=connector)
 
         render_risk_tab(tab_risk, df, spot, opt_type, atm_idx, T, rate, div_yield, calls, puts, spot_market=spot_market)
 
         surface_box = st.expander("3D Surfaces (Strike x Maturity)", expanded=False)
-        render_surfaces_section(surface_box, exp_options, ticker, spot, opt_type, rate, div_yield, hist_vol)
+        render_surfaces_section(surface_box, exp_options, ticker, spot, opt_type, rate, div_yield, hist_vol, connector=connector)
 
     except ValueError as e:
         if "No options data" in str(e):
@@ -274,9 +309,16 @@ def render_vanilla_option_pricer():
         else:
             st.error(f"Error: {str(e)}")
         logger.exception("Vanilla pricer error")
-    except Exception as e:
+    except (KeyError, TypeError, ImportError) as e:
         logger.exception("Vanilla pricer error")
-        st.error(f"Error: {str(e)}")
-        import traceback
-        with st.expander("Détails techniques"):
-            st.code(traceback.format_exc())
+        st.error(f"Erreur de données: {str(e)}")
+    except Exception as e:
+        from data.exceptions import DataError, NetworkError
+        if isinstance(e, (DataError, NetworkError)):
+            st.error(f"Erreur données/marché: {str(e)}")
+        else:
+            st.error(f"Error: {str(e)}")
+            import traceback
+            with st.expander("Détails techniques"):
+                st.code(traceback.format_exc())
+        logger.exception("Vanilla pricer error")

@@ -1,6 +1,27 @@
 import numpy as np
+from scipy.stats import norm
 from models.monte_carlo import MonteCarloPricer
 from core.black_scholes import BlackScholes
+
+
+def _barrier_hit_probability(S: float, H: float, T: float, r: float, sigma: float, q: float, is_up: bool) -> float:
+    """P(barrier touchée) : formule first-passage. is_up=True si H > S."""
+    if T <= 0 or sigma <= 0 or S <= 0 or H <= 0:
+        return 0.0
+    mu = r - q - 0.5 * sigma ** 2
+    sig_sqrt_t = sigma * np.sqrt(T)
+    if is_up:  # H > S
+        eta = (np.log(H / S) - mu * T) / sig_sqrt_t
+        zeta = (np.log(H / S) + mu * T) / sig_sqrt_t
+        lam = 2 * mu / (sigma ** 2)
+        prob = norm.cdf(eta) + (H / S) ** lam * norm.cdf(zeta)
+    else:  # down: H < S
+        eta = (np.log(H / S) - mu * T) / sig_sqrt_t
+        zeta = (np.log(H / S) + mu * T) / sig_sqrt_t
+        lam = 2 * mu / (sigma ** 2)
+        prob = norm.cdf(-eta) + (H / S) ** lam * norm.cdf(-zeta)
+    return float(np.clip(prob, 0.0, 1.0))
+
 
 class BarrierOption:
     """
@@ -68,7 +89,14 @@ class BarrierOption:
         Returns:
             dict: {'price': prix, 'std_error': erreur, 'activation_rate': taux}
         """
-        if method == "monte_carlo":
+        if method == "analytical":
+            return self._analytical_price()
+        elif method == "monte_carlo":
+            # Utiliser analytique si disponible (down/up-and-out/in)
+            try:
+                return self._analytical_price()
+            except NotImplementedError:
+                pass
             mc = MonteCarloPricer(
                 self.S, self.K, self.T, self.r, self.sigma,
                 n_simulations=n_simulations, n_steps=n_steps, seed=seed, q=self.q
@@ -90,48 +118,106 @@ class BarrierOption:
             
             return result
         
-        elif method == "analytical":
-            # Formules analytiques disponibles pour certains cas
-            return self._analytical_price()
-        
         else:
             raise ValueError(f"Method {method} not supported")
     
     def _analytical_price(self):
         """
-        Prix analytique pour barrière simple (formules de Merton).
-        
-        Disponible seulement pour certaines configurations.
+        Prix analytique pour barrières (formules Rubinstein-Reiner / Haug).
+
+        Formule down-and-out call (reflection principle):
+            C_do = C(S,K) - (H/S)^λ * C(H²/S, K)
+        avec λ = 2(r-q)/σ² - 1
+
+        Down-and-in: C_di = (H/S)^λ * C(H²/S, K)  (parité C_do + C_di = C_vanille)
         """
-        # Implémentation simplifiée pour down-and-out call
+        H = self.barrier_level
+        S, K, T, r, sigma, q = self.S, self.K, self.T, self.r, self.sigma, self.q
+
+        def _bs_call(s, k):
+            return BlackScholes.get_price(s, k, T, r, sigma, "call", q)
+
+        def _make_result(p, m='analytical_rubinstein_reiner'):
+            hit_prob = _barrier_hit_probability(S, H, T, r, sigma, q, "up" in self.barrier_type)
+            res = {'price': p, 'method': m, 'std_error': 0.0, 'activation_rate': hit_prob}
+            if "out" in self.barrier_type and self.rebate > 0:
+                res['price'] += self.rebate * np.exp(-r * T) * hit_prob
+                res['rebate_value'] = self.rebate * np.exp(-r * T) * hit_prob
+            return res
+
+        # Down-and-out call : C_do = C(S,K) - (H/S)^λ * C(H²/S, K)
         if self.barrier_type == "down-and-out" and self.option_type == "call":
-            H = self.barrier_level
-            
-            # Paramètres
-            lambda_val = (self.r + 0.5 * self.sigma ** 2) / (self.sigma ** 2)
-            y = np.log(H ** 2 / (self.S * self.K)) / (self.sigma * np.sqrt(self.T))
-            x1 = np.log(self.S / H) / (self.sigma * np.sqrt(self.T))
-            y1 = np.log(H / self.S) / (self.sigma * np.sqrt(self.T))
-            
-            # Prix vanille
-            vanilla_price = BlackScholes.get_price(
-                self.S, self.K, self.T, self.r, self.sigma, self.option_type
+            # λ = 2(r-q)/σ² - 1 (convention Haug / reflection principle)
+            lambda_val = 2 * (r - q) / (sigma ** 2) - 1
+            vanilla = _bs_call(S, K)
+            reflected_spot = (H ** 2) / S
+            reflected_call = _bs_call(reflected_spot, K)
+            price = max(0.0, vanilla - (H / S) ** lambda_val * reflected_call)
+            return _make_result(price)
+
+        # Down-and-in call : C_di = (H/S)^λ * C(H²/S, K)
+        if self.barrier_type == "down-and-in" and self.option_type == "call":
+            lambda_val = 2 * (r - q) / (sigma ** 2) - 1
+            reflected_spot = (H ** 2) / S
+            reflected_call = _bs_call(reflected_spot, K)
+            price = (H / S) ** lambda_val * reflected_call
+            return _make_result(price)
+
+        # Down-and-out put : formule symétrique
+        if self.barrier_type == "down-and-out" and self.option_type == "put":
+            lambda_val = 2 * (r - q) / (sigma ** 2) - 1
+            vanilla_put = BlackScholes.get_price(S, K, T, r, sigma, "put", q)
+            reflected_spot = (H ** 2) / S
+            reflected_put = BlackScholes.get_price(reflected_spot, K, T, r, sigma, "put", q)
+            price = max(0.0, vanilla_put - (H / S) ** lambda_val * reflected_put)
+            return _make_result(price)
+
+        # Down-and-in put
+        if self.barrier_type == "down-and-in" and self.option_type == "put":
+            lambda_val = 2 * (r - q) / (sigma ** 2) - 1
+            reflected_spot = (H ** 2) / S
+            reflected_put = BlackScholes.get_price(reflected_spot, K, T, r, sigma, "put", q)
+            price = (H / S) ** lambda_val * reflected_put
+            return _make_result(price)
+
+        # Up-and-out call (H > S, H > K) : Howison/Rubinstein-Reiner
+        if self.barrier_type == "up-and-out" and self.option_type == "call":
+            two_alpha = 1.0 - 2 * (r - q) / (sigma ** 2)
+            refl = (H ** 2) / S
+            term1 = _bs_call(S, K) - _bs_call(S, H) - (H - K) * BlackScholes.digital_call(S, H, T, r, sigma, q)
+            term2 = (S / H) ** two_alpha * (
+                _bs_call(refl, K) - _bs_call(refl, H) + (H - K) * BlackScholes.digital_call(refl, H, T, r, sigma, q)
             )
-            
-            # Approximation simplifiée
-            if H >= self.K:
-                # Barrière au-dessus du strike
-                price = vanilla_price * (self.S / H) ** (2 * lambda_val)
-            else:
-                price = vanilla_price
-            
-            return {'price': price, 'method': 'analytical_approximation'}
-        
-        else:
-            raise NotImplementedError(
-                "Analytical price not implemented for this barrier type. "
-                "Use method='monte_carlo'."
-            )
+            price = max(0.0, term1 - term2)
+            return _make_result(price)
+
+        # Up-and-in call : parité Cu/o + Cu/i = C_vanille
+        if self.barrier_type == "up-and-in" and self.option_type == "call":
+            vanilla = _bs_call(S, K)
+            uao = BarrierOption(S, K, T, r, sigma, H, "up-and-out", "call", 0, q)._analytical_price()
+            price = max(0.0, vanilla - uao['price'])
+            return _make_result(price)
+
+        # Up-and-out put (H > K) : Pu/o = Pv(S,K) - (S/H)^2α * Pv(H²/S,K)
+        if self.barrier_type == "up-and-out" and self.option_type == "put":
+            two_alpha = 1.0 - 2 * (r - q) / (sigma ** 2)
+            refl = (H ** 2) / S
+            vanilla_put = BlackScholes.get_price(S, K, T, r, sigma, "put", q)
+            reflected_put = BlackScholes.get_price(refl, K, T, r, sigma, "put", q)
+            price = max(0.0, vanilla_put - (S / H) ** two_alpha * reflected_put)
+            return _make_result(price)
+
+        # Up-and-in put : parité Pu/o + Pu/i = P_vanille
+        if self.barrier_type == "up-and-in" and self.option_type == "put":
+            vanilla = BlackScholes.get_price(S, K, T, r, sigma, "put", q)
+            uao = BarrierOption(S, K, T, r, sigma, H, "up-and-out", "put", 0, q)._analytical_price()
+            price = max(0.0, vanilla - uao['price'])
+            return _make_result(price)
+
+        raise NotImplementedError(
+            "Analytical price not implemented for this barrier type. "
+            "Use method='monte_carlo'."
+        )
     
     def compare_with_vanilla(self, n_simulations=50000, n_steps=252,
                              use_antithetic=True, seed=42, brownian_bridge=True):
@@ -191,208 +277,10 @@ class BarrierOption:
                     n_simulations=n_simulations, n_steps=n_steps
                 )  # Moins de sims pour rapidité
                 prices.append(result['price'])
-            except Exception:
+            except (ValueError, ZeroDivisionError, RuntimeError):
                 prices.append(np.nan)
         
         return {
             'barriers': barrier_range,
             'prices': np.array(prices)
         }
-
-
-class AsianOption:
-    """
-    Option Asiatique : Payoff dépend de la moyenne du prix du sous-jacent.
-    
-    Payoff Call: max(Avg(S) - K, 0)
-    Payoff Put: max(K - Avg(S), 0)
-    
-    Moins volatile qu'une option vanille car dépend de la moyenne et non du prix final.
-    Utilisée pour les commodités et le forex.
-    """
-    
-    def __init__(self, S, K, T, r, sigma, option_type="call", averaging_type="arithmetic"):
-        """
-        Args:
-            S (float): Prix spot
-            K (float): Strike
-            T (float): Maturité
-            r (float): Taux sans risque
-            sigma (float): Volatilité
-            option_type (str): "call" ou "put"
-            averaging_type (str): "arithmetic" ou "geometric"
-        """
-        self.S = S
-        self.K = K
-        self.T = T
-        self.r = r
-        self.sigma = sigma
-        self.option_type = option_type
-        self.averaging_type = averaging_type
-    
-    def price(self, n_simulations=50000):
-        """
-        Prix de l'option asiatique par Monte Carlo.
-        
-        Returns:
-            dict: {'price': prix, 'std_error': erreur}
-        """
-        mc = MonteCarloPricer(
-            self.S, self.K, self.T, self.r, self.sigma,
-            n_simulations=n_simulations, n_steps=252
-        )
-        
-        return mc.price_asian(
-            self.option_type,
-            self.averaging_type,
-            use_antithetic=True
-        )
-    
-    def compare_with_vanilla(self):
-        """Compare avec une option vanille équivalente."""
-        # Prix asiatique
-        asian_result = self.price()
-        asian_price = asian_result['price']
-        
-        # Prix vanille
-        vanilla_price = BlackScholes.get_price(
-            self.S, self.K, self.T, self.r, self.sigma, self.option_type
-        )
-        
-        # Discount
-        discount = vanilla_price - asian_price
-        discount_pct = (discount / vanilla_price) * 100 if vanilla_price > 0 else 0
-        
-        return {
-            'asian_price': asian_price,
-            'vanilla_price': vanilla_price,
-            'discount': discount,
-            'discount_pct': discount_pct,
-            'reasoning': "Asiatique moins chère car moyenne réduit la volatilité du payoff"
-        }
-
-
-class LookbackOption:
-    """
-    Option Lookback : Payoff dépend du min ou max pendant la vie de l'option.
-    
-    Lookback Call: S(T) - min(S)
-    Lookback Put: max(S) - S(T)
-    
-    "L'option du rêveur" : vous achetez au plus bas ou vendez au plus haut.
-    Très chère car pas de strike fixe.
-    """
-    
-    def __init__(self, S, T, r, sigma, option_type="call"):
-        """
-        Args:
-            S (float): Prix spot
-            T (float): Maturité
-            r (float): Taux sans risque
-            sigma (float): Volatilité
-            option_type (str): "call" ou "put"
-        """
-        self.S = S
-        self.T = T
-        self.r = r
-        self.sigma = sigma
-        self.option_type = option_type
-    
-    def price(self, n_simulations=50000):
-        """Prix par Monte Carlo."""
-        mc = MonteCarloPricer(
-            self.S, self.S, self.T, self.r, self.sigma,  # K = S (pas utilisé)
-            n_simulations=n_simulations, n_steps=252
-        )
-        
-        return mc.price_lookback(
-            self.option_type,
-            use_antithetic=True
-        )
-    
-    def compare_with_vanilla_atm(self):
-        """Compare avec un call/put ATM."""
-        lookback_result = self.price()
-        lookback_price = lookback_result['price']
-        
-        # Vanille ATM (K = S)
-        vanilla_price = BlackScholes.get_price(
-            self.S, self.S, self.T, self.r, self.sigma, self.option_type
-        )
-        
-        premium = lookback_price - vanilla_price
-        premium_pct = (premium / vanilla_price) * 100 if vanilla_price > 0 else 0
-        
-        return {
-            'lookback_price': lookback_price,
-            'vanilla_atm_price': vanilla_price,
-            'premium': premium,
-            'premium_pct': premium_pct,
-            'reasoning': "Lookback plus chère car garantit le meilleur prix possible"
-        }
-
-
-class DigitalOption:
-    """
-    Option Digitale (Binary/Cash-or-Nothing).
-    
-    Payoff:
-    - Call: Paye 1$ si S(T) > K, sinon 0
-    - Put: Paye 1$ si S(T) < K, sinon 0
-    
-    Utilisée pour parier sur la direction (pas l'amplitude) du mouvement.
-    """
-    
-    def __init__(self, S, K, T, r, sigma, option_type="call", payout=1.0):
-        """
-        Args:
-            S (float): Prix spot
-            K (float): Strike
-            T (float): Maturité
-            r (float): Taux sans risque
-            sigma (float): Volatilité
-            option_type (str): "call" ou "put"
-            payout (float): Montant du payout digital
-        """
-        self.S = S
-        self.K = K
-        self.T = T
-        self.r = r
-        self.sigma = sigma
-        self.option_type = option_type
-        self.payout = payout
-    
-    def price(self):
-        """
-        Prix analytique de l'option digitale.
-        
-        Digital Call = exp(-rT) * N(d2)
-        Digital Put = exp(-rT) * N(-d2)
-        """
-        from scipy.stats import norm
-        
-        d1 = (np.log(self.S / self.K) + (self.r + 0.5 * self.sigma ** 2) * self.T) / (self.sigma * np.sqrt(self.T))
-        d2 = d1 - self.sigma * np.sqrt(self.T)
-        
-        if self.option_type.lower() == "call":
-            price = np.exp(-self.r * self.T) * norm.cdf(d2)
-        else:
-            price = np.exp(-self.r * self.T) * norm.cdf(-d2)
-        
-        return price * self.payout
-    
-    def probability_of_payout(self):
-        """
-        Probabilité risque-neutre de recevoir le payout.
-        """
-        from scipy.stats import norm
-        
-        d1 = (np.log(self.S / self.K) + (self.r + 0.5 * self.sigma ** 2) * self.T) / (self.sigma * np.sqrt(self.T))
-        d2 = d1 - self.sigma * np.sqrt(self.T)
-        
-        if self.option_type.lower() == "call":
-            prob = norm.cdf(d2)
-        else:
-            prob = norm.cdf(-d2)
-        
-        return prob

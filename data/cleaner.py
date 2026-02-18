@@ -53,8 +53,11 @@ class DataCleaner:
         df = df[df['spread_pct'] <= max_spread_pct]
         
         # Supprimer les lignes avec volume = 0 et open interest = 0
+        # fillna(0) pour éviter que NaN > 0 soit False et supprime des lignes valides
         if 'volume' in df.columns and 'openInterest' in df.columns:
-            df = df[(df['volume'] > 0) | (df['openInterest'] > 0)]
+            vol = df['volume'].fillna(0)
+            oi = df['openInterest'].fillna(0)
+            df = df[(vol > 0) | (oi > 0)]
         
         return df.reset_index(drop=True)
     

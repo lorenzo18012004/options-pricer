@@ -5,8 +5,10 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from core.curves import YieldCurve
-from data import DataConnector
+from core.validation import validate_swap_params
+from data.exceptions import ValidationError
 from instruments import VanillaSwap, SwapCurveBuilder
+from services import get_data_connector
 
 
 def render_swap_pricer():
@@ -25,13 +27,20 @@ def render_swap_pricer():
             format_func=lambda x: x[0],
             key="sw_freq",
         )
+        day_count = st.selectbox(
+            "Day Count",
+            ["30/360", "ACT/365", "ACT/360"],
+            index=0,
+            key="sw_day_count",
+            help="30/360 (US), ACT/365, ACT/360",
+        )
         position = st.radio("Position", ["payer", "receiver"], horizontal=True, key="sw_pos")
     with c3:
         run_swap = st.button("Run Swap Pricing", type="primary", use_container_width=True, key="sw_run")
 
     sw_key = (
         float(notional), float(maturity), float(fixed_rate), int(payment_freq[1]),
-        position
+        day_count, position
     )
     if st.session_state.get("sw_key") != sw_key:
         st.session_state.pop("sw_state", None)
@@ -40,18 +49,26 @@ def render_swap_pricer():
     if not run_swap and "sw_state" not in st.session_state:
         return
 
-    # Strict market-only curve build (Yahoo par yields -> one bootstrap)
     try:
-        curve_nodes, curve_rates = DataConnector.get_treasury_par_curve()
+        validate_swap_params(notional, fixed_rate, maturity, payment_freq[1])
+    except ValidationError as e:
+        st.error(str(e))
+        return
+
+    # Curve build (Yahoo or Synthetic)
+    use_synthetic = st.session_state.get("data_source") == "Synthétique"
+    connector = get_data_connector(use_synthetic)
+    try:
+        curve_nodes, curve_rates = connector.get_treasury_par_curve()
         curve = SwapCurveBuilder.build_from_market_data(
             {}, {}, {float(T): float(r) for T, r in zip(curve_nodes, curve_rates)}
         )
-        curve_source_used = "Yahoo Treasury (live)"
-    except Exception as e_curve:
-        st.error(f"Yahoo Treasury data unavailable. Swap pricing requires live market curve. Details: {e_curve}")
+        curve_source_used = "Synthétique" if use_synthetic else "Yahoo Treasury (live)"
+    except (ValueError, KeyError, TypeError, ImportError) as e_curve:
+        st.error(f"Courbe de taux indisponible. Détails: {e_curve}")
         return
 
-    swap = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, curve, position)
+    swap = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, curve, position, day_count)
     npv = float(swap.npv())
     dv01 = float(swap.dv01())
     par_rate = float(swap.par_rate())
@@ -84,7 +101,7 @@ def render_swap_pricer():
 
     # Quality consistency check: 1bp finite-diff vs DV01
     curve_up_1bp = YieldCurve(sw["curve"].maturities, sw["curve"].rates + 0.0001)
-    swap_up = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, curve_up_1bp, position)
+    swap_up = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, curve_up_1bp, position, day_count)
     pnl_1bp = float(swap_up.npv() - sw["npv"])
     dv01_gap = abs(abs(pnl_1bp) - sw["dv01"])
     quality = max(0.0, 100.0 - min(50.0, dv01_gap / max(sw["dv01"], 1e-8) * 500.0) - min(25.0, abs(sw["mtm_bp"]) * 0.1))
@@ -128,14 +145,14 @@ def render_swap_pricer():
         for shock in shifts:
             r_par = sw["curve"].rates + shock / 10000.0
             c_par = YieldCurve(mats, r_par)
-            s_par = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, c_par, position)
+            s_par = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, c_par, position, day_count)
             npv_par = float(s_par.npv())
             rows.append({"Scenario": f"Parallel {shock:+}bp", "NPV": npv_par, "P&L": npv_par - sw["npv"]})
 
             prof = (mats - mats.min()) / max(mats.max() - mats.min(), 1e-8) - 0.5
             r_stp = sw["curve"].rates + (shock / 10000.0) * prof
             c_stp = YieldCurve(mats, r_stp)
-            s_stp = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, c_stp, position)
+            s_stp = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, c_stp, position, day_count)
             npv_stp = float(s_stp.npv())
             rows.append({"Scenario": f"Steepener {shock:+}bp", "NPV": npv_stp, "P&L": npv_stp - sw["npv"]})
 
@@ -162,7 +179,7 @@ def render_swap_pricer():
             bumped = sw["curve"].rates.copy()
             bumped[i] += 0.0001
             c_b = YieldCurve(mats, bumped)
-            s_b = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, c_b, position)
+            s_b = VanillaSwap(notional, fixed_rate, payment_freq[1], maturity, c_b, position, day_count)
             kr = float(s_b.npv() - sw["npv"])
             kr_rows.append({"Maturity_Y": float(m_key), "KeyRateDV01": kr})
         df_kr = pd.DataFrame(kr_rows)
@@ -181,7 +198,7 @@ def render_swap_pricer():
         hedge_tenor = st.selectbox("Hedge swap tenor (Y)", [2, 5, 10, 20, 30], index=2, key="sw_hedge_tenor")
         hedge_rate = st.number_input("Hedge fixed rate", value=sw["par_rate"], step=0.0005, format="%.4f", key="sw_hedge_rate")
         hedge_pos = st.radio("Hedge position", ["payer", "receiver"], horizontal=True, key="sw_hedge_pos")
-        hedge_unit = VanillaSwap(1_000_000, hedge_rate, payment_freq[1], hedge_tenor, sw["curve"], hedge_pos)
+        hedge_unit = VanillaSwap(1_000_000, hedge_rate, payment_freq[1], hedge_tenor, sw["curve"], hedge_pos, day_count)
         hedge_unit_dv01 = float(hedge_unit.dv01())
         hedge_notional = 0.0 if hedge_unit_dv01 == 0 else sw["dv01"] / hedge_unit_dv01 * 1_000_000
         h1, h2, h3 = st.columns(3)

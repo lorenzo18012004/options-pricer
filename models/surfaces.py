@@ -103,7 +103,7 @@ class VolatilitySurface:
                     if rmse < best_rmse:
                         best_rmse = rmse
                         best_params = params
-                except Exception:
+                except (ValueError, RuntimeError):
                     continue
         
         if best_params is None:

@@ -1,3 +1,9 @@
+"""Black-Scholes-Merton pricing model for European options."""
+
+from __future__ import annotations
+
+from typing import Union
+
 import numpy as np
 from scipy.stats import norm
 
@@ -18,14 +24,20 @@ class BlackScholes:
     """
 
     @staticmethod
-    def _d1d2(S, K, T, r, sigma, q=0.0):
+    def _d1d2(
+        S: float, K: float, T: float, r: float, sigma: float, q: float = 0.0
+    ) -> tuple:
         """Calcule d1 et d2."""
+        if not (np.isfinite(S) and np.isfinite(K)):
+            raise ValueError("S and K must be finite")
         if S <= 0 or K <= 0:
             raise ValueError("S and K must be > 0")
         if T <= 0:
             raise ValueError("T must be > 0")
         if sigma <= 0:
             raise ValueError("sigma must be > 0")
+        if sigma < 1e-10:
+            raise ValueError("sigma too small, numerical instability")
         d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
         return d1, d2
@@ -35,10 +47,17 @@ class BlackScholes:
     # =================================================================
 
     @staticmethod
-    def get_price(S, K, T, r, sigma, option_type="call", q=0.0):
+    def get_price(
+        S: float, K: float, T: float, r: float, sigma: float,
+        option_type: str = "call", q: float = 0.0
+    ) -> float:
         """Prix d'une option europeenne (Black-Scholes-Merton)."""
+        if not (np.isfinite(S) and np.isfinite(K)):
+            raise ValueError("S and K must be finite")
         if S <= 0 or K <= 0:
             raise ValueError("S and K must be > 0")
+        if not (np.isfinite(sigma) and np.isfinite(T) and np.isfinite(r)):
+            raise ValueError("sigma, T, r must be finite")
         if sigma <= 0 and T > 0:
             raise ValueError("sigma must be > 0 for T > 0")
         if T <= 0:
@@ -54,6 +73,14 @@ class BlackScholes:
             return K * np.exp(-r * T) * norm.cdf(-d2) - S * np.exp(-q * T) * norm.cdf(-d1)
         else:
             raise ValueError(f"option_type must be 'call' or 'put', got '{option_type}'")
+
+    @staticmethod
+    def digital_call(S, K, T, r, sigma, q=0.0) -> float:
+        """Digital call (cash-or-nothing) : paie 1 si S>K à l'échéance. Valeur = e^(-rT)*N(d2)."""
+        if T <= 0:
+            return 1.0 if S > K else 0.0
+        _, d2 = BlackScholes._d1d2(S, K, T, r, sigma, q)
+        return np.exp(-r * T) * norm.cdf(d2)
 
     # =================================================================
     # GREEKS 1ER ORDRE

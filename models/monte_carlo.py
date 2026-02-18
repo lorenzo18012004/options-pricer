@@ -4,7 +4,7 @@ class MonteCarloPricer:
     """
     Pricing d'options par simulations de Monte Carlo.
     
-    Utilisé pour les produits path-dependent (barrières, asiatiques, lookback).
+    Utilisé pour les produits path-dependent (barrières).
     Implémente des techniques de réduction de variance (Antithetic Variates).
     """
     
@@ -239,76 +239,6 @@ class MonteCarloPricer:
                     hit |= tmp
 
         return hit
-    
-    def price_asian(self, option_type="call", averaging_type="arithmetic", use_antithetic=True):
-        """
-        Prix d'une option asiatique (payoff dépend de la moyenne du sous-jacent).
-        
-        Args:
-            option_type (str): "call" ou "put"
-            averaging_type (str): "arithmetic" ou "geometric"
-            use_antithetic (bool): Réduction de variance
-        
-        Returns:
-            dict: {'price': prix, 'std_error': erreur}
-        """
-        paths = self._simulate_paths(use_antithetic)
-        
-        # Calcul de la moyenne pour chaque path
-        if averaging_type.lower() == "arithmetic":
-            avg_prices = np.mean(paths, axis=1)
-        else:
-            # Moyenne géométrique
-            avg_prices = np.exp(np.mean(np.log(paths), axis=1))
-        
-        # Payoff basé sur la moyenne
-        if option_type.lower() == "call":
-            payoffs = np.maximum(avg_prices - self.K, 0)
-        else:
-            payoffs = np.maximum(self.K - avg_prices, 0)
-        
-        # Actualisation
-        discounted_payoffs = payoffs * np.exp(-self.r * self.T)
-        
-        price = np.mean(discounted_payoffs)
-        std_error = np.std(discounted_payoffs) / np.sqrt(self.n_simulations)
-        
-        return {'price': price, 'std_error': std_error}
-    
-    def price_lookback(self, option_type="call", use_antithetic=True):
-        """
-        Prix d'une option lookback (payoff dépend du min ou max du path).
-        
-        - Lookback Call: Payoff = S(T) - min(S)
-        - Lookback Put: Payoff = max(S) - S(T)
-        
-        Args:
-            option_type (str): "call" ou "put"
-            use_antithetic (bool): Réduction de variance
-        
-        Returns:
-            dict: {'price': prix, 'std_error': erreur}
-        """
-        paths = self._simulate_paths(use_antithetic)
-        
-        final_prices = paths[:, -1]
-        
-        if option_type.lower() == "call":
-            # Lookback call : S(T) - min(S)
-            min_prices = np.min(paths, axis=1)
-            payoffs = np.maximum(final_prices - min_prices, 0)
-        else:
-            # Lookback put : max(S) - S(T)
-            max_prices = np.max(paths, axis=1)
-            payoffs = np.maximum(max_prices - final_prices, 0)
-        
-        # Actualisation
-        discounted_payoffs = payoffs * np.exp(-self.r * self.T)
-        
-        price = np.mean(discounted_payoffs)
-        std_error = np.std(discounted_payoffs) / np.sqrt(self.n_simulations)
-        
-        return {'price': price, 'std_error': std_error}
     
     def calculate_greeks_mc(self, option_type="call", bump_size=0.01):
         """

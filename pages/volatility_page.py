@@ -5,11 +5,12 @@ import streamlit as st
 
 from core import BlackScholes
 from core.heston import HestonModel
-from data import DataConnector, DataCleaner
+from data import DataCleaner
 from config.options import MONEYNESS_MIN, MONEYNESS_MAX
 from models import BinomialTree, MonteCarloPricer
 from services import (
     build_expiration_options,
+    get_data_connector,
     load_market_snapshot,
     require_hist_vol_market_only,
 )
@@ -68,9 +69,12 @@ def render_volatility_strategies():
     if not st.button("Load Strategy Market Data", type="primary", use_container_width=True) and not st.session_state.get("str_loaded"):
         return
 
+    use_synthetic = st.session_state.get("data_source") == "Synthétique"
+    connector = get_data_connector(use_synthetic)
+
     try:
         with st.spinner(f"Loading {ticker}..."):
-            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker)
+            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker, connector=connector)
         st.session_state["str_loaded"] = True
 
         exp_options = build_expiration_options(expirations, max_items=20)
@@ -81,11 +85,12 @@ def render_volatility_strategies():
         selected_exp = st.selectbox("Expiration", [e["label"] for e in exp_options], key="str_exp")
         exp_idx = [e["label"] for e in exp_options].index(selected_exp)
         exp_date = exp_options[exp_idx]["date"]
-        biz_days = exp_options[exp_idx].get("biz_days", exp_options[exp_idx]["days"])
+        cal_days = exp_options[exp_idx]["days"]
+        biz_days = exp_options[exp_idx].get("biz_days", cal_days)
         T = max(biz_days / 252.0, 1e-6)
 
         with st.spinner(f"Loading option chain for {exp_date}..."):
-            calls, puts = DataConnector.get_option_chain(ticker, exp_date)
+            calls, puts = connector.get_option_chain(ticker, exp_date)
         calls = DataCleaner.clean_option_chain(calls.copy(), min_bid=0.01)
         puts = DataCleaner.clean_option_chain(puts.copy(), min_bid=0.01)
         calls = DataCleaner.filter_by_moneyness(calls, spot, MONEYNESS_MIN, MONEYNESS_MAX)
@@ -94,8 +99,8 @@ def render_volatility_strategies():
             st.error("Insufficient liquid calls/puts for strategy construction.")
             return
 
-        rate = DataConnector.get_risk_free_rate(T)
-        hist_vol = require_hist_vol_market_only(ticker, biz_days)
+        rate = connector.get_risk_free_rate(T)
+        hist_vol = require_hist_vol_market_only(ticker, biz_days, connector=connector)
 
         calls_tbl = calls[["strike", "bid", "ask", "impliedVolatility", "volume", "openInterest"]].copy()
         puts_tbl = puts[["strike", "bid", "ask", "impliedVolatility", "volume", "openInterest"]].copy()
@@ -147,14 +152,22 @@ def render_volatility_strategies():
             row_p = puts_tbl[puts_tbl["strike"] == K_put].iloc[0]
             strategy_label = "Strangle"
 
-        iv_candidates = [row_c.get("impliedVolatility", np.nan), row_p.get("impliedVolatility", np.nan)]
+        def _iv(r, is_call):
+            if strategy_mode == "Straddle":
+                return r.get("call_iv" if is_call else "put_iv", np.nan)
+            return r.get("impliedVolatility", np.nan)
+        iv_candidates = [_iv(row_c, True), _iv(row_p, False)]
         iv_candidates = [x for x in iv_candidates if pd.notna(x) and x > 0]
         iv_market = float(np.mean(iv_candidates)) if iv_candidates else float(hist_vol)
         vol_source = st.radio("Vol input for model", ["Market IV avg", "Historical Vol"], horizontal=True, key="str_vol_source")
         sigma = iv_market if vol_source == "Market IV avg" else float(hist_vol)
 
-        call_bid, call_ask, call_mid = float(row_c["bid"]), float(row_c["ask"]), float(row_c["mid"])
-        put_bid, put_ask, put_mid = float(row_p["bid"]), float(row_p["ask"]), float(row_p["mid"])
+        if strategy_mode == "Straddle":
+            call_bid, call_ask, call_mid = float(row_c["call_bid"]), float(row_c["call_ask"]), float(row_c["call_mid"])
+            put_bid, put_ask, put_mid = float(row_p["put_bid"]), float(row_p["put_ask"]), float(row_p["put_mid"])
+        else:
+            call_bid, call_ask, call_mid = float(row_c["bid"]), float(row_c["ask"]), float(row_c["mid"])
+            put_bid, put_ask, put_mid = float(row_p["bid"]), float(row_p["ask"]), float(row_p["mid"])
         premium_market = call_mid + put_mid
 
         exec_box = st.expander("Execution Assumptions", expanded=False)
@@ -202,20 +215,25 @@ def render_volatility_strategies():
         tabs = st.tabs(["Legs & Greeks", "P&L at Expiry", "P&L Attribution", "Model Comparison", "Risk"])
 
         with tabs[0]:
+            def _leg_col(r, is_call, prefix):
+                if strategy_mode == "Straddle":
+                    p = "call_" if is_call else "put_"
+                    return r.get(p + prefix, r.get(prefix, np.nan))
+                return r.get(prefix, np.nan)
             legs_df = pd.DataFrame([
                 {
                     "Leg": "Call", "Strike": K_call, "Bid": call_bid, "Ask": call_ask, "Mid": call_mid,
-                    "IV_%": row_c["impliedVolatility"] * 100 if pd.notna(row_c["impliedVolatility"]) else np.nan,
-                    "Spread_%": row_c["spread_pct"] * 100 if pd.notna(row_c["spread_pct"]) else np.nan,
-                    "Volume": row_c["volume"], "OpenInt": row_c["openInterest"],
+                    "IV_%": _leg_col(row_c, True, "iv") * 100 if pd.notna(_leg_col(row_c, True, "iv")) else np.nan,
+                    "Spread_%": _leg_col(row_c, True, "spread_pct") * 100 if pd.notna(_leg_col(row_c, True, "spread_pct")) else np.nan,
+                    "Volume": _leg_col(row_c, True, "vol"), "OpenInt": _leg_col(row_c, True, "oi"),
                     "BSM_Price": call_bs, "Delta": call_g["delta"], "Gamma": call_g["gamma"], "Vega": call_g["vega"],
                     "Theta": call_g["theta"], "Vanna": call_g["vanna"], "Volga": call_g["volga"],
                 },
                 {
                     "Leg": "Put", "Strike": K_put, "Bid": put_bid, "Ask": put_ask, "Mid": put_mid,
-                    "IV_%": row_p["impliedVolatility"] * 100 if pd.notna(row_p["impliedVolatility"]) else np.nan,
-                    "Spread_%": row_p["spread_pct"] * 100 if pd.notna(row_p["spread_pct"]) else np.nan,
-                    "Volume": row_p["volume"], "OpenInt": row_p["openInterest"],
+                    "IV_%": _leg_col(row_p, False, "iv") * 100 if pd.notna(_leg_col(row_p, False, "iv")) else np.nan,
+                    "Spread_%": _leg_col(row_p, False, "spread_pct") * 100 if pd.notna(_leg_col(row_p, False, "spread_pct")) else np.nan,
+                    "Volume": _leg_col(row_p, False, "vol"), "OpenInt": _leg_col(row_p, False, "oi"),
                     "BSM_Price": put_bs, "Delta": put_g["delta"], "Gamma": put_g["gamma"], "Vega": put_g["vega"],
                     "Theta": put_g["theta"], "Vanna": put_g["vanna"], "Volga": put_g["volga"],
                 },
@@ -315,9 +333,12 @@ def render_volatility_strategies():
             ]
 
             n_tree = st.slider("Binomial steps", 500, 1500, 500, 100, key="str_tree_steps")
+            dividends = []
+            if hasattr(connector, "get_dividends_schedule"):
+                dividends = connector.get_dividends_schedule(ticker, exp_date)
             try:
-                tree_call = BinomialTree(spot, K_call, T, rate, sigma, "call", n_steps=n_tree, q=div_yield).price_american_cv(call_bs)
-                tree_put = BinomialTree(spot, K_put, T, rate, sigma, "put", n_steps=n_tree, q=div_yield).price_american_cv(put_bs)
+                tree_call = BinomialTree(spot, K_call, T, rate, sigma, "call", n_steps=n_tree, dividends=dividends, q=div_yield).price_american_cv(call_bs)
+                tree_put = BinomialTree(spot, K_put, T, rate, sigma, "put", n_steps=n_tree, dividends=dividends, q=div_yield).price_american_cv(put_bs)
                 tree_price = float(tree_call + tree_put)
                 p_rows.append({"Model": "Binomial (American)", "Price": tree_price, "Vs Market": tree_price - premium_market})
             except (ValueError, RuntimeError):
@@ -526,8 +547,8 @@ def render_volatility_strategies():
                 )
                 hedge_box.plotly_chart(fig_h, use_container_width=True)
 
-            avg_spread = float(np.nanmean([row_c["spread_pct"], row_p["spread_pct"]]) * 100.0)
-            avg_oi = float(np.nanmean([row_c["openInterest"], row_p["openInterest"]]))
+            avg_spread = float(np.nanmean([_leg_col(row_c, True, "spread_pct"), _leg_col(row_p, False, "spread_pct")]) * 100.0)
+            avg_oi = float(np.nanmean([_leg_col(row_c, True, "oi"), _leg_col(row_p, False, "oi")]))
             parity_gap = np.nan
             if strategy_label == "Straddle":
                 parity_gap = abs((call_mid - put_mid) - (spot * np.exp(-div_yield * T) - K_call * np.exp(-rate * T)))
@@ -546,8 +567,8 @@ def render_volatility_strategies():
 
             rl1, rl2, rl3 = st.columns(3)
             rl1.metric("Entry Cost / Spot", f"{(premium_ref / max(spot, 1e-8)) * 100:.2f}%")
-            rl2.metric("Call Spread", f"{(row_c['spread_pct'] * 100):.2f}%")
-            rl3.metric("Put Spread", f"{(row_p['spread_pct'] * 100):.2f}%")
+            rl2.metric("Call Spread", f"{(_leg_col(row_c, True, 'spread_pct') * 100):.2f}%")
+            rl3.metric("Put Spread", f"{(_leg_col(row_p, False, 'spread_pct') * 100):.2f}%")
             if quality_score >= 80:
                 st.success("Execution quality: GOOD")
             elif quality_score >= 60:
@@ -566,7 +587,7 @@ def render_volatility_strategies():
             )
         else:
             st.error(f"Error: {str(e)}")
-    except Exception as e:
+    except (ValueError, KeyError, TypeError, ImportError) as e:
         st.error(f"Error: {str(e)}")
         import traceback
         with st.expander("Détails techniques"):

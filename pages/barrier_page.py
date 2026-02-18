@@ -3,12 +3,15 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from data import DataConnector, DataCleaner
+from data import DataCleaner
+from core.validation import validate_ticker, validate_barrier_params
+from data.exceptions import ValidationError
 from config.options import MONEYNESS_MIN, MONEYNESS_MAX
 from instruments import BarrierOption
 from models import MonteCarloPricer
 from services import (
     build_expiration_options,
+    get_data_connector,
     load_market_snapshot,
     require_hist_vol_market_only,
 )
@@ -45,8 +48,17 @@ def render_barrier_pricer():
         return
 
     try:
+        ticker = validate_ticker(ticker)
+    except ValidationError as e:
+        st.error(str(e))
+        return
+
+    use_synthetic = st.session_state.get("data_source") == "Synthétique"
+    connector = get_data_connector(use_synthetic)
+
+    try:
         with st.spinner(f"Loading {ticker}..."):
-            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker)
+            spot, expirations, _market_data, div_yield = load_market_snapshot(ticker, connector=connector)
         st.session_state["br_loaded"] = True
 
         exp_options = build_expiration_options(expirations, max_items=20)
@@ -57,10 +69,11 @@ def render_barrier_pricer():
         selected_exp = st.selectbox("Expiration", [e["label"] for e in exp_options], key="br_exp")
         exp_idx = [e["label"] for e in exp_options].index(selected_exp)
         exp_date = exp_options[exp_idx]["date"]
-        biz_days = exp_options[exp_idx].get("biz_days", exp_options[exp_idx]["days"])
+        cal_days = exp_options[exp_idx]["days"]
+        biz_days = exp_options[exp_idx].get("biz_days", cal_days)
         T = max(biz_days / 252.0, 1e-6)
-        rate = DataConnector.get_risk_free_rate(T)
-        hist_vol = require_hist_vol_market_only(ticker, biz_days)
+        rate = connector.get_risk_free_rate(T)
+        hist_vol = require_hist_vol_market_only(ticker, biz_days, connector=connector)
 
         option_type = st.radio("Option Type", ["call", "put"], horizontal=True, key="br_opt_type")
         barrier_type = st.selectbox(
@@ -70,7 +83,7 @@ def render_barrier_pricer():
         )
 
         with st.spinner(f"Loading {option_type} chain..."):
-            calls, puts = DataConnector.get_option_chain(ticker, exp_date)
+            calls, puts = connector.get_option_chain(ticker, exp_date)
         chain = (calls if option_type == "call" else puts).copy()
         chain = DataCleaner.clean_option_chain(chain, min_bid=0.01)
         chain = DataCleaner.filter_by_moneyness(chain, spot, MONEYNESS_MIN, MONEYNESS_MAX)
@@ -111,6 +124,11 @@ def render_barrier_pricer():
             use_antithetic = st.checkbox("Antithetic variates", value=True, key="br_anti")
         with c3:
             run_price = st.button("Price Barrier Option", type="primary", use_container_width=True, key="br_run")
+
+        try:
+            validate_barrier_params(spot, barrier, option_type, barrier_type)
+        except ValidationError as e:
+            st.warning(str(e))
 
         br_key = (
             ticker, exp_date, option_type, barrier_type, float(spot), float(strike), float(T), float(rate),
@@ -270,7 +288,7 @@ def render_barrier_pricer():
                         rr = tmp.price(n_simulations=sens_sims, n_steps=max(50, br_state["steps"] // 2), use_antithetic=True, seed=11)
                         prices.append(rr["price"])
                         hit_rates.append(rr.get("activation_rate", np.nan) * 100.0)
-                    except Exception:
+                    except (ValueError, ZeroDivisionError, RuntimeError):
                         prices.append(np.nan)
                         hit_rates.append(np.nan)
 
@@ -309,8 +327,9 @@ def render_barrier_pricer():
                             br_state["barrier"], barrier_type, option_type, rebate=rebate, q=br_state["div_yield"]
                         )
                         rr = tmp.price(n_simulations=small_sims, n_steps=max(50, n_steps // 2), use_antithetic=True, seed=19)
-                        z[i, j] = rr["price"] - base_price
-                    except Exception:
+                        raw_pnl = rr["price"] - base_price
+                        z[i, j] = max(raw_pnl, -base_price)  # Long: floor -premium
+                    except (ValueError, ZeroDivisionError, RuntimeError):
                         z[i, j] = np.nan
 
             fig_risk = go.Figure(data=go.Heatmap(
@@ -383,9 +402,6 @@ def render_barrier_pricer():
             )
         else:
             st.error(f"Error: {str(e)}")
-    except Exception as e:
+    except (KeyError, TypeError, ImportError) as e:
         st.error(f"Error: {str(e)}")
-        import traceback
-        with st.expander("Détails techniques"):
-            st.code(traceback.format_exc())
 
