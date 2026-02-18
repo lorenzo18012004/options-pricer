@@ -7,6 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
+from data.synthetic import get_excel_status
 from pages import (
     render_vanilla_option_pricer,
     render_volatility_strategies,
@@ -88,6 +89,13 @@ def main():
             help="Yahoo Finance: live data (may be blocked on cloud). Synthetic: generated data for demo."
         )
         st.session_state["data_source"] = data_source
+
+        if data_source == "Synthetic":
+            excel_ok, excel_msg = get_excel_status()
+            if excel_ok:
+                st.success("✓ synthetic_data.xlsx loaded")
+            else:
+                st.warning(f"Synthetic: {excel_msg}")
 
         st.markdown("## Product Selection")
         product = st.selectbox(

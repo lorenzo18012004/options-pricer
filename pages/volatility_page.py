@@ -39,7 +39,9 @@ def _plot_pnl_profile(spots, pnls, current_spot, breakevens=None):
 
 def render_volatility_strategies():
     """Volatility strategies pricer: straddle + strangle."""
-    st.markdown("### Volatility Strategies - Live Data")
+    data_src = st.session_state.get("data_source", "Synthetic")
+    title_suffix = "Live" if data_src == "Yahoo Finance" else "Synthetic"
+    st.markdown(f"### Volatility Strategies - {title_suffix} Data")
 
     from .tickers import POPULAR_TICKERS
     popular_tickers = POPULAR_TICKERS
@@ -65,6 +67,14 @@ def render_volatility_strategies():
             if k not in ("str_asset", "str_custom_ticker", "str_mode"):
                 st.session_state.pop(k, None)
         st.session_state["str_ticker"] = ticker
+
+    if "str_data_source" not in st.session_state:
+        st.session_state["str_data_source"] = st.session_state.get("data_source", "Synthetic")
+    if st.session_state.get("str_data_source") != st.session_state.get("data_source"):
+        for k in list(st.session_state.keys()):
+            if k.startswith("str_") and k not in ("str_asset", "str_custom_ticker", "str_mode"):
+                st.session_state.pop(k, None)
+        st.session_state["str_data_source"] = st.session_state.get("data_source")
 
     if not st.button("Load Strategy Market Data", type="primary", use_container_width=True) and not st.session_state.get("str_loaded"):
         return
@@ -133,8 +143,8 @@ def render_volatility_strategies():
             K_put = float(K)
             strategy_label = "Straddle"
         else:
-            call_candidates = calls_tbl[calls_tbl["strike"] >= spot]
-            put_candidates = puts_tbl[puts_tbl["strike"] <= spot]
+            call_candidates = calls_tbl[calls_tbl["strike"] >= spot].reset_index(drop=True)
+            put_candidates = puts_tbl[puts_tbl["strike"] <= spot].reset_index(drop=True)
             if len(call_candidates) == 0 or len(put_candidates) == 0:
                 st.error("Need OTM call and OTM put strikes around spot for strangle.")
                 return
