@@ -1,2 +1,0 @@
-# System dependencies for Streamlit Cloud (if needed)
-# Leave empty if none required

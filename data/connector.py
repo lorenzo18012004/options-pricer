@@ -378,7 +378,7 @@ class DataConnector:
                 return []
 
             _set_cached(f"exp_{ticker_symbol}", expirations)
-            logger.info(f"{_log_prefix()}{ticker_symbol}: {len(expirations)} expirations disponibles")
+            logger.info(f"{_log_prefix()}{ticker_symbol}: {len(expirations)} expirations available")
             return expirations
 
         except (AttributeError, KeyError, TypeError, ConnectionError, TimeoutError) as e:
@@ -555,7 +555,7 @@ class DataConnector:
         rate = float(curve.get_zero_rate(time_to_maturity_years))
 
         _set_cached(f"rate_curve_{time_to_maturity_years:.4f}", rate)
-        logger.info(f"{_log_prefix()}Taux interpole ({time_to_maturity_years:.2f}Y): {rate:.4f}")
+        logger.info(f"{_log_prefix()}Interpolated rate ({time_to_maturity_years:.2f}Y): {rate:.4f}")
         return rate
 
     # =========================================================================
@@ -646,9 +646,10 @@ class DataConnector:
             returns = np.log(hist['Close'] / hist['Close'].shift(1)).dropna()
             vol = float(returns.tail(window).std() * np.sqrt(252))
 
+            mat_str = f"maturity={maturity_days}d" if maturity_days is not None else "maturity=N/A"
             logger.info(
                 f"{_log_prefix()}HV {ticker_symbol}: window={window}d "
-                f"(maturity={maturity_days}d) -> {vol:.1%}"
+                f"({mat_str}) -> {vol:.1%}"
             )
 
             return vol

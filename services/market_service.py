@@ -95,9 +95,9 @@ class FallbackDataConnector:
 
 def get_data_connector(use_synthetic: bool = False):
     """
-    Retourne le connecteur de données.
-    Si use_synthetic=False : FallbackDataConnector (Yahoo avec fallback Synthétique).
-    Si use_synthetic=True : SyntheticDataConnector uniquement.
+    Returns the data connector.
+    If use_synthetic=False: FallbackDataConnector (Yahoo with Synthetic fallback).
+    If use_synthetic=True: SyntheticDataConnector only.
     """
     if use_synthetic or st.session_state.get("data_source") == "Synthetic":
         # Reset fallback state when using Synthetic
@@ -165,7 +165,7 @@ def require_hist_vol_market_only(
     connector: Union[Type[DataConnectorProtocol], Type[DataConnector], Type[SyntheticDataConnector]] = None,
 ) -> float:
     """
-    Récupère la volatilité historique (échoue si indisponible).
+    Retrieves historical volatility (fails if unavailable).
 
     Args:
         ticker: Symbole
