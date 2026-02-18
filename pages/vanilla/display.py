@@ -15,26 +15,20 @@ def render_market_summary(summary_box, df, spot, atm_idx, days_to_exp, maturity_
         c1.metric("Spot", f"${spot:.2f}")
         c2.metric("ATM Strike", f"${atm_strike:.0f}")
         c3.metric("Days", f"{days_to_exp}", help=f"{maturity_mode} to expiry")
-        c4.metric("Rate", f"{rate*100:.2f}%",
-                  help="Risk-free rate interpolated from US Treasury curve (Yahoo: ^IRX, ^FVX, ^TNX, ^TYX).")
+        c4.metric("Rate", f"{rate*100:.2f}%")
         c5.metric("ATM IV", f"{atm_iv:.1f}%")
-        c6.metric(f"Hist Vol ({hv_window}d)", f"{hist_vol*100:.1f}%",
-                  help=f"{hv_window}d window matched to {biz_days_to_exp} business days to expiry")
+        c6.metric(f"Hist Vol ({hv_window}d)", f"{hist_vol*100:.1f}%")
         iv_hv_spread = atm_iv - hist_vol * 100
         c7, c8, c9, c10 = summary_box.columns(4)
-        c7.metric("IV - HV Spread", f"{iv_hv_spread:+.1f}%",
-                  help="Positive = options are expensive vs realized vol")
+        c7.metric("IV - HV Spread", f"{iv_hv_spread:+.1f}%")
         atm_mask = (df["Moneyness"] >= 0.95) & (df["Moneyness"] <= 1.05)
         atm_spread_pct = df.loc[atm_mask, "Spread_%"].median() if atm_mask.any() else df["Spread_%"].median()
         atm_spread_dollar = df.loc[atm_mask, "Spread_$"].median() if atm_mask.any() and "Spread_$" in df.columns else (df["Ask"] - df["Bid"]).median() if "Ask" in df.columns and "Bid" in df.columns else 0
-        c8.metric("ATM Spread", f"{atm_spread_pct:.1f}% (${atm_spread_dollar:.2f})",
-                  help="Median (Ask-Bid)/Mid and Ask-Bid in $ over 95-105% moneyness.")
+        c8.metric("ATM Spread", f"{atm_spread_pct:.1f}% (${atm_spread_dollar:.2f})")
         vol_val = total_volume_exp if total_volume_exp is not None else df["Volume"].sum()
         oi_val = total_oi_exp if total_oi_exp is not None else df["OpenInt"].sum()
-        c9.metric("Total Volume", f"{vol_val:,.0f}",
-                  help="Daily volume for the whole expiration (calls+puts). Yahoo intraday.")
-        c10.metric("Total OI", f"{oi_val:,.0f}",
-                   help="Open Interest for the whole expiration (calls+puts), previous close.")
+        c9.metric("Total Volume", f"{vol_val:,.0f}")
+        c10.metric("Total OI", f"{oi_val:,.0f}")
 
 
 def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_type,
@@ -43,12 +37,9 @@ def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_typ
     with dq_box:
         retention_pct = (filtered_count / raw_count * 100) if raw_count > 0 else 0
         dq1, dq2, dq3, dq4 = dq_box.columns(4)
-        dq1.metric("Raw strikes", f"{raw_count}",
-                   help="All strikes returned by Yahoo for the expiration.")
-        dq2.metric("Filtered strikes", f"{filtered_count}",
-                   help="After clean + moneyness 80-120%.")
-        dq3.metric("Retention", f"{retention_pct:.1f}%",
-                   help="filtered / raw. See funnel below.")
+        dq1.metric("Raw strikes", f"{raw_count}")
+        dq2.metric("Filtered strikes", f"{filtered_count}")
+        dq3.metric("Retention", f"{retention_pct:.1f}%")
         dq4.metric("Quote timestamp", quote_ts if quote_ts else "N/A")
         chk = df[["Strike", "Mid"]].dropna().sort_values("Strike").reset_index(drop=True)
         mono_breaches = 0
@@ -62,11 +53,9 @@ def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_typ
         dq5.metric("Monotonicity breaches", f"{mono_breaches}")
         dq6.metric("Convexity breaches", f"{conv_breaches}")
         med_spread_dollar = df["Spread_$"].median() if "Spread_$" in df.columns else (df["Ask"] - df["Bid"]).median() if "Ask" in df.columns and "Bid" in df.columns else 0
-        dq7.metric("Med spread", f"{df['Spread_%'].median():.2f}% (${med_spread_dollar:.2f})",
-                   help="Median over strikes (80-120% moneyness).")
+        dq7.metric("Med spread", f"{df['Spread_%'].median():.2f}% (${med_spread_dollar:.2f})")
         dq8, dq9, dq10 = dq_box.columns(3)
-        dq8.metric("SVI fit RMSE", f"{svi_fit_rmse_pct:.3f}%" if svi_fit_rmse_pct is not None else "N/A",
-                   help="If > 5%, automatic fallback to market IV (SVI too noisy).")
+        dq8.metric("SVI fit RMSE", f"{svi_fit_rmse_pct:.3f}%" if svi_fit_rmse_pct is not None else "N/A")
         dq9.metric("Day count", day_count_basis)
         dq10.metric("Maturity clock", "Calendar")
         penalty = 0.0
@@ -76,37 +65,7 @@ def render_data_quality(dq_box, df, raw_count, filtered_count, quote_ts, opt_typ
         if svi_fit_rmse_pct is not None:
             penalty += min(20.0, max(0.0, svi_fit_rmse_pct - 3.0) * 2.0)
         quality_score = max(0.0, 100.0 - penalty)
-        qs_col1, qs_col2 = dq_box.columns(2)
-        qs_col1.metric("Pricing quality score", f"{quality_score:.1f}/100")
-        if quality_score >= 80:
-            qs_col2.success("Quality regime: GOOD")
-        elif quality_score >= 60:
-            qs_col2.warning("Quality regime: ACCEPTABLE")
-        else:
-            qs_col2.error("Quality regime: NOISY")
-        if mono_breaches == 0 and conv_breaches == 0:
-            dq_box.success("No-arbitrage quick checks: clean on filtered universe.")
-        else:
-            dq_box.warning("Some no-arbitrage checks fail.")
-        if count_after_clean is not None and raw_count > 0:
-            pct_clean = count_after_clean / raw_count * 100
-            pct_mny = filtered_count / count_after_clean * 100 if count_after_clean > 0 else 0
-            dq_box.markdown("**Retention funnel:**")
-            dq_box.markdown(
-                f"- **1. clean_option_chain** : {raw_count} → {count_after_clean} ({pct_clean:.1f}%)  "
-                f"*Excludes: bid/ask ≤ 1¢, spread > 50%, volume=0 AND OI=0*"
-            )
-            dq_box.markdown(
-                f"- **2. filter_by_moneyness(80-120%)** : {count_after_clean} → {filtered_count} ({pct_mny:.1f}%)  "
-                f"*Liquid ATM zone.*"
-            )
-            dq_box.caption(
-                "Rationale: 80-120% moneyness options concentrate liquidity. "
-                "Deep OTM have noisy IVs."
-            )
-        dq_box.caption(
-            "Mid = (Bid+Ask)/2. Yahoo Finance: bid/ask ~15min delayed."
-        )
+        dq_box.metric("Pricing quality score", f"{quality_score:.1f}/100")
 
 
 def render_chain_display(chain_box, df, option_type, ticker, exp_date):

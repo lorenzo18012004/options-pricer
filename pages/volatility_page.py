@@ -220,7 +220,6 @@ def render_volatility_strategies():
         b2.metric("Upper Breakeven", f"${upper_be:.2f}")
         b3.metric("Rate", f"{rate*100:.2f}%")
         b4.metric("Dividend Yield", f"{div_yield*100:.2f}%")
-        exec_box.caption(f"Entry premium = ${raw_entry:.3f} adjusted by {slippage_bps} bps -> ${premium_ref:.3f}")
 
         tabs = st.tabs(["Legs & Greeks", "P&L at Expiry", "P&L Attribution", "Model Comparison", "Risk"])
 
@@ -579,12 +578,6 @@ def render_volatility_strategies():
             rl1.metric("Entry Cost / Spot", f"{(premium_ref / max(spot, 1e-8)) * 100:.2f}%")
             rl2.metric("Call Spread", f"{(_leg_col(row_c, True, 'spread_pct') * 100):.2f}%")
             rl3.metric("Put Spread", f"{(_leg_col(row_p, False, 'spread_pct') * 100):.2f}%")
-            if quality_score >= 80:
-                st.success("Execution quality: GOOD")
-            elif quality_score >= 60:
-                st.warning("Execution quality: ACCEPTABLE")
-            else:
-                st.error("Execution quality: NOISY")
 
             mc_state = st.session_state.get("str_mc_result")
 

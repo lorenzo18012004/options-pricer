@@ -177,11 +177,9 @@ def render_pnl_tab(tab, df, spot, opt_type, atm_idx):
             st.metric("Mid Price", f"${premium_mid:.2f}")
             st.metric("Spread Cost", f"${spread_cost:.2f}/share")
             if is_long:
-                st.metric("Total Cost", f"${entry_price * MULTIPLIER * n_contracts:,.0f}",
-                          help=f"{n_contracts} x {MULTIPLIER} x ${entry_price:.2f}")
+                st.metric("Total Cost", f"${entry_price * MULTIPLIER * n_contracts:,.0f}")
             else:
-                st.metric("Total Credit", f"${entry_price * MULTIPLIER * n_contracts:,.0f}",
-                          help=f"{n_contracts} x {MULTIPLIER} x ${entry_price:.2f} (received)")
+                st.metric("Total Credit", f"${entry_price * MULTIPLIER * n_contracts:,.0f}")
 
             if opt_type == "call":
                 be = pnl_strike + entry_price
@@ -192,11 +190,10 @@ def render_pnl_tab(tab, df, spot, opt_type, atm_idx):
                 st.metric("Max Loss", f"${entry_price * MULTIPLIER * n_contracts:,.0f}")
             else:
                 if opt_type == "call":
-                    st.metric("Max Loss", "Unlimited", help="Short call: unlimited loss if spot rises")
+                    st.metric("Max Loss", "Unlimited")
                 else:
                     max_loss_put = (pnl_strike - entry_price) * MULTIPLIER * n_contracts
-                    st.metric("Max Loss", f"${max_loss_put:,.0f}",
-                              help="Short put: perte max si spot → 0")
+                    st.metric("Max Loss", f"${max_loss_put:,.0f}")
 
         with col_pnl2:
             spot_range = np.linspace(spot * 0.7, spot * 1.3, 200)

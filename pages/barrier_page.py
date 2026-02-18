@@ -220,13 +220,6 @@ def render_barrier_pricer():
         q2.metric("In/Out Parity Gap", f"${parity_gap:+.4f}" if not np.isnan(parity_gap) else "N/A")
         q3.metric("Quote vs Vanilla", f"${market_mid - comparison['vanilla_price']:+.4f}")
         q4.metric("Barrier Quality Score", f"{quality:.1f}/100")
-        if quality >= 80:
-            st.success("Barrier pricing quality: GOOD")
-        elif quality >= 60:
-            st.warning("Barrier pricing quality: ACCEPTABLE")
-        else:
-            st.error("Barrier pricing quality: NOISY")
-
         tab_overview, tab_sens, tab_risk, tab_diag = st.tabs(
             ["Overview", "Sensitivity", "Risk Scenarios", "Diagnostics"]
         )

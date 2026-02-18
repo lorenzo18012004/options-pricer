@@ -32,7 +32,6 @@ def render_swap_pricer():
             ["30/360", "ACT/365", "ACT/360"],
             index=0,
             key="sw_day_count",
-            help="30/360 (US), ACT/365, ACT/360",
         )
         position = st.radio("Position", ["payer", "receiver"], horizontal=True, key="sw_pos")
     with c3:

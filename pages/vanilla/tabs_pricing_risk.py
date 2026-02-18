@@ -71,10 +71,6 @@ def render_risk_tab(tab, df, spot, opt_type, atm_idx, T, rate, div_yield, calls,
                                          index=int(atm_idx), key="sc_strike")
                 sc_row = df[df["Strike"] == sc_strike].iloc[0]
                 sc_iv = sc_row["IV_%"] / 100
-                st.caption(
-                    f"**Current (Spot):** ${spot_underlying:.2f} | "
-                    f"Option Mid: ${sc_row['Mid']:.2f} | IV: {sc_iv*100:.1f}%"
-                )
             with col_sc2:
                 spot_shocks = np.linspace(-15, 15, 13)
                 vol_shocks = np.linspace(-10, 10, 9)
